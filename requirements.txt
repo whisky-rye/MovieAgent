@@ -1,0 +1,12 @@
+# 开发期直接依赖（基线，不锁 patch 号；精确版本见 requirements.lock.txt）
+sqlalchemy>=2
+aiomysql>=0.2
+pymysql>=1.1
+pydantic-settings>=2.5
+chromadb>=0.5
+langchain-ollama>=0.2
+pytest>=8
+# 后续 Agent 层(P3)需要，提前列入基线：
+langchain>=0.3
+langchain-core>=0.3
+langgraph>=0.2

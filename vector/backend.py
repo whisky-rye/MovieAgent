@@ -31,6 +31,10 @@ class VectorBackend(ABC):
     @abstractmethod
     def count(self) -> int: ...
 
+    @abstractmethod
+    def get_embeddings(self, ids: list[str]) -> list[list[float]]:
+        """按 id 取已存向量（供「以物品找相似」类召回）。"""
+
 
 class ChromaBackend(VectorBackend):
     def __init__(self, path: str | None = None, collection: str = "movies"):
@@ -58,6 +62,10 @@ class ChromaBackend(VectorBackend):
 
     def count(self) -> int:
         return self.collection.count()
+
+    def get_embeddings(self, ids: list[str]) -> list[list[float]]:
+        r = self.collection.get(ids=ids, include=["embeddings"])
+        return r["embeddings"]
 
 
 class QdrantBackend(VectorBackend):
