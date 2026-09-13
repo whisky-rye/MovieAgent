@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     GUARDRAIL_BLOCK_OFFTOPIC: bool = True   # 越域（非影视）是否引导；False 则交给 Agent 降级处理
     GUARDRAIL_MODE: str = "rule"            # rule（零额度，纯本地规则）| hybrid（边界 case 调 chat_light 复核）
 
+    # ---- 限流（P5 补充：令牌桶，内存级单进程） ----
+    RATELIMIT_ENABLED: bool = True   # 总开关；False 则不限制
+    RATELIMIT_RATE: float = 0.2      # 令牌补充速率（个/秒）= 每 5 秒允许 1 次真实 LLM 调用
+    RATELIMIT_BURST: int = 3         # 桶容量（突发上限）= 允许瞬时最多 3 次真实调用
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

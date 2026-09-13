@@ -125,7 +125,7 @@ curl http://127.0.0.1:8000/health
 { "intent":"guardrail", "guardrail": {"action":"block", "category":"sensitive:porn", "reason":"…"}, "items": [], "answer":"…合规拒答语…" }
 ```
 
-开关（`.env`，见第 8 节）：
+开关（`.env`，见第 9 节）：
 ```
 GUARDRAIL_ENABLED=true        # 总开关；false 全部放行
 GUARDRAIL_BLOCK_OFFTOPIC=true # 越域是否引导；false 则交给 Agent 降级
@@ -135,14 +135,34 @@ GUARDRAIL_MODE=rule           # rule（零额度，纯本地规则）| hybrid（
 
 ---
 
-## 7. 并发说明（重要）
+## 7. 接口限流（令牌桶，P5 补充）
+
+`api/ratelimit.py` 的内存级**令牌桶**，限制「真实触发 LLM 的速率」，防止云端额度被刷爆 / 并发排队雪崩。
+
+- **按 key 隔离**（默认 `user_id`）：不同用户各一桶，互不影响；`consume(user_id)` 取 1 令牌。
+- **仅在护栏放行 + 非缓存命中时消耗令牌**：缓存命中（`/recommend`）、护栏拦截都不计，只有真正进 Agent 调 LLM 才扣令牌——最贵的资源才被限。
+- **接入点**：`api/main.py` 的 `_run()` 内、护栏放行**之后**、锁**之前**。超限时 `/recommend` 返回标准 **HTTP 429 + `Retry-After` 头**；`/chat` 流式推提示文本（首字节已发无法改状态码）。
+- **算法**：桶容量 `burst`，按 `rate`（个/秒）持续补充；令牌耗尽即拒，不排队进锁。
+
+开关（`.env`，见第 9 节）：
+```
+RATELIMIT_ENABLED=true   # 总开关；false 则不限制
+RATELIMIT_RATE=0.2       # 令牌补充速率（个/秒）= 每 5 秒允许 1 次真实 LLM 调用
+RATELIMIT_BURST=3        # 桶容量（突发上限）= 允许瞬时最多 3 次真实调用
+```
+> 实测：默认配置下正常单次 / demo 交互不会误伤；收紧 `burst=1` 后，同用户第 2 个未缓存请求秒回 `429 Retry-After: 14`。
+> 生产多进程 / 多机需换 Redis 令牌桶（redis-py + Lua 原子扣减），否则每 worker 各一桶、总配额 = 单桶 × worker 数。
+
+---
+
+## 8. 并发说明（重要）
 模块级 `_AGENT` 与云端 LLM 客户端并非为并发调用设计——实测并发请求会把 worker 打挂（连接被重置）。`api/main.py` 用 `threading.Lock` 把 Agent/LLM 调用**串行化（单飞）**，保证稳定性；代价是并发请求会排队（一个 60s 的 `/chat` 会让后续 `/recommend` 等它结束）。
 - 单机 Demo / 单用户场景完全够用。
 - 若要高并发：改为多 uvicorn worker（`--workers N`）+ 每请求独立 LLM 客户端，或把锁缩小到仅 LLM 调用。
 
 ---
 
-## 8. 配置（`.env` 关键项）
+## 9. 配置（`.env` 关键项）
 ```
 LLM_PROVIDER=ollama|cloud          # 默认 ollama 本地优先
 # 云端（阿里云百炼 OpenAI 兼容）
@@ -170,21 +190,21 @@ IMDB_MYSQL_DATABASE=imdb
 
 ---
 
-## 9. 排错速查
+## 10. 排错速查
 | 现象 | 原因 / 解决 |
 |------|--------------|
 | `{"detail":"There was an error parsing the body"}` | Windows CMD 用单引号 `'` 包裹 JSON 导致非法 → 用 `-d @log/req.json` 文件方式，或 Git Bash/PowerShell 单引号，或 CMD 双引号转义 `\"` |
 | `unknown command 'HELLO'`（redis-py） | 本地 Redis 太老（3.2.100）→ 已用 `protocol=2`（RESP2）兼容 |
 | 后台服务起不来 / 被回收 | Git Bash 无 `nohup`/`setsid` 且每次 Bash 是新 shell → 用 `scripts/_serve.py`（`DETACHED_PROCESS` 脱离启动）+ `dev.sh` 管理 |
 | 等待命令无 `sleep`/`seq` | Git Bash 缺这两条 → 用 `curl --retry N --retry-delay 2 --retry-connrefused` 轮询就绪 |
-| 并发后服务挂掉 | 见第 7 节（已加锁修复稳定性，但会串行排队） |
+| 并发后服务挂掉 | 见第 8 节（已加锁修复稳定性，但会串行排队） |
 
 ---
 
-## 10. 目录结构
+## 11. 目录结构
 ```
 movie_agent/
-├── api/            # FastAPI 服务（main.py / cache.py）
+├── api/            # FastAPI 服务（main.py / cache.py / ratelimit.py）
 ├── agent/          # LangGraph 编排（graph / intent / tools / rag / memory）
 ├── retrieval/      # 多路召回
 ├── ranker/         # MMR 重排

@@ -21,6 +21,8 @@ from pydantic import BaseModel, Field
 from agent.graph import build_agent
 from retrieval.candidates import Candidate
 from api.cache import get_cache, cache_key
+from api.ratelimit import get_limiter, RateLimited
+from config.settings import settings
 
 app = FastAPI(title="影片推荐智能体 API", version="0.1.0")
 
@@ -65,6 +67,13 @@ def _run(query: str, user_id: str) -> dict:
             "items": [],
             "guardrail": {"action": g.action, "category": g.category, "reason": g.reason},
         }
+
+    # 限流（P5 补充）：仅护栏放行、且非缓存命中的真实 LLM 调用才消耗令牌。
+    # 放在锁之前——否则排队中的请求都占锁等待，限流失去意义。
+    if settings.RATELIMIT_ENABLED:
+        ok, retry_after = get_limiter().consume(user_id)
+        if not ok:
+            raise RateLimited(retry_after)
 
     with _RUN_LOCK:
         result = _AGENT.invoke({"user_id": user_id, "query": query})
@@ -114,6 +123,12 @@ def recommend(req: RecommendReq):
     t0 = time.time()
     try:
         state = _run(req.query, req.user_id)
+    except RateLimited as e:  # 限流触发：标准 429 + Retry-After
+        raise HTTPException(
+            status_code=429,
+            detail="请求过于频繁，请稍后再试（rate limit）",
+            headers={"Retry-After": str(max(1, int(e.retry_after)))},
+        )
     except Exception as e:  # noqa: BLE001 - 接口层兜底，向上抛 500
         raise HTTPException(status_code=500, detail=f"推荐失败: {e}")
     items = state["items"][: req.top_k]
@@ -139,6 +154,9 @@ async def chat(req: ChatReq):
     async def gen():
         try:
             state = await asyncio.to_thread(_run, req.query, req.user_id)
+        except RateLimited as e:  # 流式接口无法回 429 状态码，推提示文本
+            yield f"请求过于频繁，请 {max(1, int(e.retry_after))} 秒后再试。\n"
+            return
         except Exception as e:  # noqa: BLE001
             yield f"抱歉，出错了：{e}\n"
             return
