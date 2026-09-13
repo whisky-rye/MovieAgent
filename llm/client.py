@@ -25,3 +25,12 @@ def chat_light(**kwargs) -> ChatOllama:
         temperature=0.1,
         **kwargs,
     )
+
+
+def strip_think(text: str) -> str:
+    """清洗本地推理模型（deepseek-r1 / qwen3 等）常见的 <think>...</think> 标签。
+
+    这些标签会出现在 JSON 结构化输出或自然语言答案里，必须剥离后再解析/展示。
+    """
+    import re
+    return re.sub(r"<think>[\s\S]*?</think>", "", text or "").strip()

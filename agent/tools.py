@@ -1,0 +1,111 @@
+"""Agent 工具集（5 个 LangChain 工具）。
+
+前 3 个是对接召回层的「检索工具」，返回紧凑可读摘要；同时暴露 RUNNERS 注册表，
+供 LangGraph 节点直接取 Candidate 列表做多路融合（避免字符串回解的脆弱）。
+后 2 个：偏好记忆写入、RAG 解释。
+"""
+from langchain_core.tools import tool
+from retrieval.candidates import Candidate
+from retrieval import content_recall, relation_recall, coldstart_recall
+from ranker import rerank
+from agent.memory import get_memory_store
+
+
+def _fmt(cands: list[Candidate], label: str) -> str:
+    if not cands:
+        return f"[{label}] 无命中"
+    lines = [f"[{label}] 命中 {len(cands)} 条："]
+    for i, c in enumerate(cands[:10], 1):
+        g = "/".join(c.genres[:3]) if c.genres else "-"
+        r = f"{c.rating:.1f}" if c.rating else "?"
+        lines.append(f"{i}. {c.title}({c.year}) [{g}] 评分{r} id={c.id}")
+    return "\n".join(lines)
+
+
+# ---- 检索工具（LangChain 工具面，供 LLM 工具调用 / 交互使用）----
+
+@tool
+def search_by_text(query: str, top_k: int = 10, genres: list = None,
+                   country: str = None, min_year: int = 0, min_rating: float = 0.0) -> str:
+    """根据自然语言描述（如『太空科幻 孤独』）做内容相似召回。可附带类型/国家/年份过滤。"""
+    cands = content_recall(query=query, top_k=top_k, genres=genres or None,
+                           country=country or None,
+                           min_year=min_year or None,
+                           min_rating=min_rating or None)
+    return _fmt(cands, "内容相似")
+
+
+@tool
+def search_similar(item_id: str, top_k: int = 10) -> str:
+    """找与某作品相似的影片（同时融合「同导演/卡司」关系召回）。item_id 形如 douban:{PK} 或 imdb:{imdb_id}。"""
+    cands = _run_search_similar(item_id, top_k)
+    return _fmt(cands, "相似+关系")
+
+
+@tool
+def high_quality_board(top_k: int = 10, genres: list = None,
+                       country: str = None, min_year: int = 0) -> str:
+    """无明确偏好时的高分口碑榜单兜底（质量×热度）。可过滤类型/国家/年份。"""
+    cands = coldstart_recall(top_k=top_k, genres=genres or None,
+                             country=country or None, min_year=min_year or None)
+    return _fmt(cands, "高分榜")
+
+
+@tool
+def remember_preference(user_id: str, genres: list = None, note: str = None) -> str:
+    """记录用户偏好（喜欢的类型或备注），用于后续推荐加权。"""
+    prefs = get_memory_store().add_pref(user_id, genres=genres, note=note)
+    return f"已记录偏好：{prefs}"
+
+
+@tool
+def explain_recommendation(query: str, top_k: int = 6) -> str:
+    """对一段需求做端到端推荐并生成解释（内容召回 + RAG 解说）。"""
+    from agent.rag import generate_explanation
+    cands = content_recall(query=query, top_k=top_k * 3)
+    ranked = rerank(cands, strategy="mmr", top_k=top_k)
+    return generate_explanation(query, ranked, prefs={}, user_id="tool")
+
+
+# ---- RUNNERS：供 LangGraph 节点直接取 Candidate 列表做融合 ----
+
+def _run_search_by_text(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:
+    g = slots.get("genres") or prefs.get("genres")
+    return content_recall(
+        query=slots.get("query") or "",
+        top_k=top_k,
+        genres=g or None,
+        country=slots.get("country") or None,
+        min_year=slots.get("min_year") or None,
+        min_rating=slots.get("min_rating") or None,
+    )
+
+
+def _run_search_similar(item_id: str, top_k: int = 20) -> list[Candidate]:
+    sim = content_recall(item_id=item_id, top_k=top_k)
+    rel = relation_recall(item_id=item_id, top_k=top_k)
+    fused = rerank({"content": sim, "relation": rel}, strategy="score", top_k=top_k)
+    return fused
+
+
+def _run_board(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:
+    g = slots.get("genres") or prefs.get("genres")
+    return coldstart_recall(
+        top_k=top_k,
+        genres=g or None,
+        country=slots.get("country") or None,
+        min_year=slots.get("min_year") or None,
+    )
+
+
+RUNNERS = {
+    "search_by_text": _run_search_by_text,
+    "search_similar": _run_search_similar,
+    "high_quality_board": _run_board,
+}
+
+
+def get_tools():
+    """返回 5 个 LangChain 工具（供交互式 tool-calling 使用）。"""
+    return [search_by_text, search_similar, high_quality_board,
+            remember_preference, explain_recommendation]
