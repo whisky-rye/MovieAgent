@@ -1,0 +1,13 @@
+# 密钥与本地环境
+.env
+
+# 虚拟环境
+.venv/
+venv/
+
+# 本地向量库数据
+data/
+
+# Python 缓存
+__pycache__/
+*.pyc
