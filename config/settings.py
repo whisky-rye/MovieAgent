@@ -43,7 +43,12 @@ class Settings(BaseSettings):
     QDRANT_PATH: str = "./data/qdrant"
 
     # ---- 缓存 / 可观测 ----
-    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    REDIS_HOST: str = "127.0.0.1"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_PASSWORD: str = ""
+    REDIS_TTL: int = 300         # 召回结果缓存 TTL（秒）
     LANGSMITH_API_KEY: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

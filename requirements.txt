@@ -11,3 +11,7 @@ pytest>=8
 langchain>=0.3
 langchain-core>=0.3
 langgraph>=0.2
+# P4 接口与工程化（FastAPI 服务 + 本地进程）
+fastapi>=0.141
+uvicorn[standard]>=0.30
+redis>=5
