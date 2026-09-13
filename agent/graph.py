@@ -18,20 +18,42 @@ from llm.client import chat_light, strip_think
 from agent.rag import generate_explanation
 
 
+def _extract_json(text: str) -> dict | None:
+    """从模型输出里抽出第一个 {..} JSON 块（容错 think 残留/多余文本）。"""
+    import re
+    m = re.search(r"\{[\s\S]*?\}", text or "")
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return None
+
+
 def _parse_intent(state: AgentState) -> AgentState:
     uid = state.get("user_id", "default")
     query = state.get("query", "")
     llm = chat_light()
+    slots = None
     try:
         resp = llm.invoke([SystemMessage(content=INTENT_PROMPT),
                            HumanMessage(content=query)])
-        txt = strip_think(resp.content)
-        slots = json.loads(txt)
+        slots = _extract_json(strip_think(resp.content))
     except Exception:
+        slots = None
+    if not slots:
         slots = _heuristic(query)
     intent = slots.get("intent", "recommend")
     if intent not in ("recommend", "similar", "board", "explain", "preference"):
         intent = "recommend"
+    # 关键词矫正：即便 LLM 误判，命中偏好语也归为 preference
+    if intent != "preference" and ("记一下" in query or "记住" in query
+                                    or ("我" in query and "喜欢" in query)
+                                    or "我的偏好" in query or "偏好" in query):
+        intent = "preference"
+    # query 兜底：内容类意图若解析出 query 为空，用原始输入
+    if not slots.get("query") and intent in ("recommend", "similar", "board", "explain"):
+        slots["query"] = query
     return {"intent": intent, "slots": slots,
             "messages": [HumanMessage(content=query)]}
 
@@ -74,7 +96,7 @@ def _plan(state: AgentState) -> AgentState:
 
 def _execute(state: AgentState) -> AgentState:
     uid = state.get("user_id", "default")
-    slots = state.get("slots", {})
+    slots = dict(state.get("slots", {}))
     prefs = get_memory_store().get_prefs(uid)
     user_genres = prefs.get("genres")
     recall: dict[str, list] = {}
@@ -83,7 +105,12 @@ def _execute(state: AgentState) -> AgentState:
             if name == "search_similar":
                 recall["similar"] = RUNNERS["search_similar"](slots.get("item_id"), top_k=20)
             else:
-                recall[name] = RUNNERS[name](slots, prefs, top_k=20)
+                # query 兜底：内容召回若 slots 无 query，用原始输入或偏好类型
+                eff = slots
+                if name == "search_by_text" and not slots.get("query"):
+                    fb = state.get("query") or (" ".join(user_genres) if user_genres else "高分好看的作品")
+                    eff = {**slots, "query": fb}
+                recall[name] = RUNNERS[name](eff, prefs, top_k=20)
         ranked = rerank(recall, strategy="mmr", top_k=20, user_genres=user_genres)
     except Exception as e:
         return {"error": f"召回失败: {e}", "ranked": []}

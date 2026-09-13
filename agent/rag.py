@@ -18,12 +18,27 @@ def build_context(ranked: list[Candidate], top_n: int = 8) -> str:
 
 def generate_explanation(query: str, ranked: list[Candidate],
                          prefs: dict, user_id: str) -> str:
-    """端到端：检索上下文 + 强档 LLM -> 解释性推荐语。"""
+    """端到端：检索上下文 + 强档 LLM -> 解释性推荐语。
+
+    空响应兜底：本地小模型偶发返回空/异常，此时用候选拼模板解说，
+    保证「永远有可解释 answer」，不让前端拿到空白。
+    """
     context = build_context(ranked)
     prefs_s = "，".join(prefs.get("genres", [])) or "（暂无）"
     prompt = EXPLAIN_PROMPT.format(query=query or "（未明确）",
                                    prefs=prefs_s, context=context)
     llm = chat_strong()
-    resp = llm.invoke([SystemMessage(content="你是影片推荐解说员，中文作答。"),
-                       HumanMessage(content=prompt)])
-    return strip_think(resp.content)
+    try:
+        resp = llm.invoke([SystemMessage(content="你是影片推荐解说员，中文作答。"),
+                           HumanMessage(content=prompt)])
+        text = strip_think(resp.content).strip()
+    except Exception:
+        text = ""
+    if not text:
+        lines = [f"根据你的需求「{query or '好看的片子'}」，结合已记录偏好（{prefs_s}），为你挑出以下作品："]
+        for i, c in enumerate(ranked[:5], 1):
+            g = "/".join(c.genres[:3]) if c.genres else "未知"
+            r = f"{c.rating:.1f}" if c.rating else "未知"
+            lines.append(f"{i}. 《{c.title}》({c.year}) 类型:{g} 评分:{r}")
+        return "\n".join(lines)
+    return text

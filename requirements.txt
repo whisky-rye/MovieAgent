@@ -5,6 +5,7 @@ pymysql>=1.1
 pydantic-settings>=2.5
 chromadb>=0.5
 langchain-ollama>=0.2
+langchain-openai>=0.1
 pytest>=8
 # 后续 Agent 层(P3)需要，提前列入基线：
 langchain>=0.3
