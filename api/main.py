@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import time
 from typing import Optional
 
@@ -25,6 +26,11 @@ app = FastAPI(title="影片推荐智能体 API", version="0.1.0")
 
 # 模块级编译一次，所有请求复用（避免每次重新构图）
 _AGENT = build_agent()
+
+# 并发保护：模块级 _AGENT 与云端 LLM 客户端（OpenAI 兼容）并非为并发调用设计，
+# 实测并发请求会把 worker 打挂（连接被重置）。开发期服务用一把锁把 Agent/LLM 调用
+# 串行化（单飞），保证稳定性；代价是并发请求会排队，对 Demo 可接受。
+_RUN_LOCK = threading.Lock()
 
 
 def _candidate_to_dict(c: Candidate) -> dict:
@@ -44,13 +50,30 @@ def _candidate_to_dict(c: Candidate) -> dict:
 
 
 def _run(query: str, user_id: str) -> dict:
-    """同步跑 Agent，返回完整 state（answer + ranked 候选）。"""
-    result = _AGENT.invoke({"user_id": user_id, "query": query})
+    """同步跑 Agent，返回完整 state（answer + ranked 候选）。
+
+    护栏（P5 补充）：在锁之前先做内容安全判定——命中敏感/越域直接返回，
+    不进入 Agent、不消耗云端额度。放行才进入串行化调用。
+    """
+    from agent.guardrail import check_guardrail
+
+    g = check_guardrail(query)
+    if g.action != "allow":
+        return {
+            "answer": g.message,
+            "intent": "guardrail",
+            "items": [],
+            "guardrail": {"action": g.action, "category": g.category, "reason": g.reason},
+        }
+
+    with _RUN_LOCK:
+        result = _AGENT.invoke({"user_id": user_id, "query": query})
     ranked = result.get("ranked", []) or []
     return {
         "answer": result.get("answer", ""),
         "intent": result.get("intent", ""),
         "items": [_candidate_to_dict(c) for c in ranked],
+        "guardrail": {"action": "allow", "category": "ok", "reason": ""},
     }
 
 
@@ -104,6 +127,7 @@ def recommend(req: RecommendReq):
         "elapsed_ms": int((time.time() - t0) * 1000),
         "cached": False,
         "cache_backend": cache.backend(),
+        "guardrail": state.get("guardrail", {"action": "allow", "category": "ok", "reason": ""}),
     }
     cache.set(ck, resp)
     return resp
