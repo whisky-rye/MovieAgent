@@ -34,13 +34,17 @@ def rrf_fuse(
     top_k: int | None = None,
     user_genres: list[str] | None = None,
     key_to_canon: dict | None = None,
-) -> list[Candidate]:
+    explain: bool = False,
+) -> list[Candidate] | tuple[list[Candidate], dict]:
     """按排名位次做 RRF 融合，再叠加质量分/偏好分，返回综合分降序列表。
 
     - 每路召回按其自身顺序定 rank（1-based）；单路 RRF 分 = w_src / (k + rank)。
     - 跨源同 id 累加 RRF 分（多路印证 → 更高）。
     - 归一化到 [0,1]（除以最大 RRF 分）后与质量分/偏好分相加（与原 fuse 一致）。
     - recall_source 跨源合并标记（content|relation|coldstart...）。
+
+    explain=True 时返回 (ranked_list, explain_map)：explain_map[id] 含各路排名位次(ranks)、
+    RRF 原始/归一化分、质量/偏好分、来源集合，供 P4 步骤可视化「各路排名来源」。
     """
     w = weights or {}
     ktc = key_to_canon or _PLAN_TO_CANON
@@ -52,6 +56,7 @@ def rrf_fuse(
     rrf: dict[str, float] = {}
     sources: dict[str, list[str]] = {}
     best: dict[str, Candidate] = {}
+    ranks: dict[str, dict[str, int]] = {}
 
     for src_key, cands in recall.items():
         w_src = _eff(src_key)
@@ -59,6 +64,7 @@ def rrf_fuse(
             if not c.id:
                 continue
             rrf[c.id] = rrf.get(c.id, 0.0) + w_src / (k + rank)
+            ranks.setdefault(c.id, {})[src_key] = rank
             if c.id not in best:
                 best[c.id] = c
             rs = c.recall_source or ""
@@ -66,10 +72,11 @@ def rrf_fuse(
                 sources.setdefault(c.id, []).append(rs)
 
     if not rrf:
-        return []
+        return [] if not explain else ([], {})
 
     max_rrf = max(rrf.values())
     merged: dict[str, Candidate] = {}
+    emap: dict[str, dict] = {}
     for cid, raw in rrf.items():
         base = (raw / max_rrf) if max_rrf else 0.0   # 归一化到 [0,1]
         c = best[cid]
@@ -78,6 +85,24 @@ def rrf_fuse(
         d["score"] = base + quality + pref
         d["recall_source"] = "|".join(sources.get(cid, [])) or (c.recall_source or "")
         merged[cid] = Candidate(**d)
+        emap[cid] = {
+            "sources": sources.get(cid, []),
+            "ranks": ranks.get(cid, {}),
+            "rrf_raw": round(raw, 6),
+            "rrf_norm": round(base, 4),
+            "quality": round(quality, 4),
+            "pref": round(pref, 4),
+            "final": round(d["score"], 4),
+            "strategy": "rrf",
+        }
 
     ranked = sorted(merged.values(), key=lambda x: x.score, reverse=True)
-    return ranked[:top_k] if top_k else ranked
+    if top_k:
+        ranked = ranked[:top_k]
+    for i, c in enumerate(ranked, 1):
+        em = emap.get(c.id)
+        if em:
+            em["rank"] = i
+    if explain:
+        return ranked, emap
+    return ranked

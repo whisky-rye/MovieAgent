@@ -36,13 +36,17 @@ def fuse(
     weights: dict | None = None,
     user_genres: list[str] | None = None,
     top_k: int | None = None,
-) -> list[Candidate]:
+    explain: bool = False,
+) -> list[Candidate] | tuple[list[Candidate], dict]:
     """把多路召回按来源加权融合，叠加质量分与偏好分，返回按综合分降序的列表。
 
     - 每路召回分数先 min-max 归一化到 [0,1]，避免量级差异（相似度 vs 关联度 vs 榜单分）。
     - 质量分：rating/10 × 0.2（IMDb 0、或低分作品不爆雷）。
     - 偏好分：与 user_genres 重叠每个 +0.15，封顶 0.3。
     - 跨源同一作品(id)合并去重，取最高综合分并累加召回来源标记。
+
+    explain=True 时返回 (ranked_list, explain_map)，explain_map[id] 含各路归一化分、
+    质量/偏好分、来源集合与最终综合分，供 P4 步骤可视化「各路排名来源」。
     """
     w = weights or _DEFAULT_WEIGHTS
     norm: dict[str, dict[float, float]] = {}
@@ -50,6 +54,7 @@ def fuse(
         norm[src] = _minmax([c.score for c in cands])
 
     merged: dict[str, Candidate] = {}
+    emap: dict[str, dict] = {}
     for src, cands in recall.items():
         src_w = w.get(src, 1.0)
         for c in cands:
@@ -58,13 +63,36 @@ def fuse(
             total = base + quality + pref
             if c.id in merged:
                 merged[c.id].score = max(merged[c.id].score, total)
-                if c.recall_source not in merged[c.id].recall_source:
+                if c.recall_source and c.recall_source not in merged[c.id].recall_source:
                     merged[c.id].recall_source = f"{merged[c.id].recall_source}|{c.recall_source}"
+                em = emap[c.id]
+                if src not in em["sources"]:
+                    em["sources"].append(src)
+                em["base_by_src"][src] = round(base, 4)
+                if total > em["best_total"]:
+                    em["best_total"] = total
             else:
                 merged[c.id] = Candidate(**{**_as_dict(c), "score": total})
+                emap[c.id] = {
+                    "sources": [src] if src else [],
+                    "base_by_src": {src: round(base, 4)} if src else {},
+                    "quality": round(quality, 4),
+                    "pref": round(pref, 4),
+                    "best_total": total,
+                    "strategy": "score",
+                }
 
     ranked = sorted(merged.values(), key=lambda x: x.score, reverse=True)
-    return ranked[:top_k] if top_k else ranked
+    if top_k:
+        ranked = ranked[:top_k]
+    for i, c in enumerate(ranked, 1):
+        em = emap.get(c.id)
+        if em:
+            em["rank"] = i
+            em["final"] = round(c.score, 4)
+    if explain:
+        return ranked, emap
+    return ranked
 
 
 def _genre_overlap(a: Candidate, b: Candidate) -> float:

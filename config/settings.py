@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     FUSION_STRATEGY: str = "rrf"
     # RRF 常数 K（名次惩罚项）：越大则高排名优势相对越弱、各路越平等；常用 60
     RRF_K: int = 60
+    # RRF 来源权重（P3 配置化）：内容相似最高、关系次之、冷启动兜底最低
+    # （避免「同剧组」关系召回过强）。格式 key:value 逗号分隔；仅作相对偏置，可省略。
+    RRF_WEIGHTS: str = "content:1.0,relation:0.8,coldstart:0.6"
+
+    # ---- 二级重排 pipeline（P2/P3 配置化） ----
+    # 融合后是否做 MMR 多样性重排（避免清一色同类型）；默认开，等价原 strategy='mmr'
+    RERANK_DIVERSIFY: bool = True
+    # 可选 LLM pointwise 精排：对前 N 名做 LIGHT 相关性微调；0=关闭（默认，控成本）
+    RERANK_LLM_TOPN: int = 0
+    # MMR 多样性强度 λ：0=只看融合分，1=只看多样性；0.3 为常用值
+    MMR_LAMBDA: float = 0.3
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -129,6 +140,26 @@ class Settings(BaseSettings):
         if not raw:
             return []
         return [m.strip() for m in raw.split(",") if m.strip()]
+
+    @property
+    def RRF_WEIGHTS_DICT(self) -> dict:
+        """把 RRF_WEIGHTS 字符串解析为 {canon_key: float} 权重字典。
+
+        例：'content:1.0,relation:0.8,coldstart:0.6' -> {'content':1.0,'relation':0.8,'coldstart':0.6}
+        解析失败项自动跳过；空字符串返回 {}（即全部等权 1.0）。
+        """
+        out: dict = {}
+        for kv in (self.RRF_WEIGHTS or "").split(","):
+            kv = kv.strip()
+            if not kv or ":" not in kv:
+                continue
+            k, v = kv.split(":", 1)
+            k = k.strip()
+            try:
+                out[k] = float(v.strip())
+            except ValueError:
+                continue
+        return out
 
 
 settings = Settings()

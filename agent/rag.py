@@ -130,14 +130,14 @@ def source_one_liner(meta: dict) -> str:
     """对话 answer 末尾追加的最简来源一句话。
 
     单来源：〔信息来源〕豆瓣（8 部）
-    双来源：〔信息来源〕豆瓣（8 部）、IMDb（2 部）（各来源作品信息见返回 sources 字段）
+    双来源：〔信息来源〕豆瓣（8 部）、IMDb（2 部）
     """
     if not meta or not meta.get("blocks"):
         return ""
     parts = [f"{b['label']}（{b['count']} 部）" for b in meta["blocks"]]
     line = "、".join(parts)
     if meta.get("has_both"):
-        line += "（各来源作品信息已在返回结果的 sources 字段中分开展示）"
+        line += ""
     return f"\n\n〔信息来源〕{line}"
 
 

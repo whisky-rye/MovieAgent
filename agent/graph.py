@@ -26,6 +26,7 @@ from config.settings import settings
 from llm.client import chat_light, strip_think
 from agent.rag import (generate_explanation, build_source_meta, source_one_liner,
                        _generate_rich, _extract_thinking)
+from ranker.rrf import _PLAN_TO_CANON
 
 
 def _extract_json(text: str) -> dict | None:
@@ -62,6 +63,46 @@ def _new_step(state: AgentState, node: str, kind: str, summary: str,
         "elapsed_ms": elapsed_ms,
         "thinking": thinking,
     }
+
+
+# 召回来源 → 中文标签（用于融合可解释步骤的可读展示）
+_SRC_CN = {"content": "内容", "relation": "关系", "coldstart": "冷启动"}
+
+
+def _fmt_fusion_explain(fusion_detail: dict, ranked: list, n: int = 5) -> list[str]:
+    """把 RRF/score 融合的 explain_map 转成人类可读的「各路排名来源」句子。
+
+    例：『《星际穿越》综合#1：内容#3 · 关系#1 · 冷启动#— → RRF=0.83 +质量0.18 +偏好0.30 = 1.31』
+    仅取融合后 top-N 展示，控制 steps 体积。
+    """
+    lines: list[str] = []
+    if not fusion_detail:
+        return lines
+    for c in ranked[:n]:
+        fd = fusion_detail.get(c.id)
+        if not fd:
+            continue
+        ranks = fd.get("ranks", {})
+        if ranks:
+            parts = []
+            for src_key, rk in ranks.items():
+                canon = _PLAN_TO_CANON.get(src_key, src_key)
+                parts.append(f"{_SRC_CN.get(canon, canon)}#{rk}")
+            rank_line = " · ".join(parts)
+        else:
+            rank_line = "单路"
+        strat = fd.get("strategy", "rrf")
+        if strat == "rrf":
+            contrib = (f"RRF={fd.get('rrf_norm','?')} "
+                       f"+质量{fd.get('quality','?')} +偏好{fd.get('pref','?')}")
+        else:
+            bsrc = fd.get("base_by_src", {})
+            bparts = " · ".join(f"{_SRC_CN.get(_PLAN_TO_CANON.get(s, s), s)}={v}"
+                                for s, v in bsrc.items()) or "—"
+            contrib = (f"归一分[{bparts}] "
+                       f"+质量{fd.get('quality','?')} +偏好{fd.get('pref','?')}")
+        lines.append(f"《{c.title}》综合#{fd.get('rank','?')}：{rank_line} → {contrib} = {fd.get('final','?')}")
+    return lines
 
 
 def _parse_intent(state: AgentState) -> AgentState:
@@ -168,7 +209,11 @@ def _execute(state: AgentState) -> AgentState:
                     fb = state.get("query") or (" ".join(user_genres) if user_genres else "高分好看的作品")
                     eff = {**slots, "query": fb}
                 recall[name] = RUNNERS[name](eff, prefs, top_k=20)
-        ranked = rerank(recall, strategy="mmr", top_k=20, user_genres=user_genres)
+        res = rerank(recall, diversify=settings.RERANK_DIVERSIFY,
+                     llm_topn=settings.RERANK_LLM_TOPN, query=state.get("query"),
+                     top_k=20, user_genres=user_genres, explain=True)
+        fusion_detail = res.get("fusion_detail") if isinstance(res, dict) else {}
+        ranked = res["ranked"] if isinstance(res, dict) else res
     except Exception as e:
         elapsed = int((time.time() - t0) * 1000)
         step = _new_step(state, "execute", "retrieval", "召回失败",
@@ -181,7 +226,12 @@ def _execute(state: AgentState) -> AgentState:
                      f"多路召回 {sum(recall_counts.values())} 条 → 重排 {len(ranked)} 条",
                      detail={"plan": list(recall.keys()), "recall_counts": recall_counts,
                              "ranked_count": len(ranked),
-                             "fusion_strategy": settings.FUSION_STRATEGY},
+                             "fusion_strategy": settings.FUSION_STRATEGY,
+                             "pipeline": {"diversify": settings.RERANK_DIVERSIFY,
+                                          "llm_topn": settings.RERANK_LLM_TOPN,
+                                          "mmr_lambda": settings.MMR_LAMBDA,
+                                          "fusion_weights": settings.RRF_WEIGHTS_DICT},
+                             "fusion_explain": _fmt_fusion_explain(fusion_detail, ranked, n=5)},
                      elapsed_ms=elapsed)
     _append_step(state, step)
     return {"candidates": recall, "ranked": ranked, "steps": [step]}
@@ -200,11 +250,17 @@ def _reflect(state: AgentState) -> AgentState:
         merged = state.get("candidates", {})
         merged["coldstart_fallback"] = board
         user_genres = get_memory_store().get_prefs(state.get("user_id", "default")).get("genres")
-        ranked = rerank(merged, strategy="mmr", top_k=20, user_genres=user_genres)
+        res = rerank(merged, diversify=settings.RERANK_DIVERSIFY,
+                     llm_topn=settings.RERANK_LLM_TOPN, query=state.get("query"),
+                     top_k=20, user_genres=user_genres, explain=True)
+        fusion_detail = res.get("fusion_detail") if isinstance(res, dict) else {}
+        ranked = res["ranked"] if isinstance(res, dict) else res
         elapsed = int((time.time() - t0) * 1000)
         step = _new_step(state, "reflect", "retrieval",
                          f"候选不足，冷启动兜底补 {len(board)} 条 → 重排 {len(ranked)} 条",
-                         detail={"fallback_count": len(board), "ranked_count": len(ranked)},
+                         detail={"fallback_count": len(board), "ranked_count": len(ranked),
+                                 "fusion_strategy": settings.FUSION_STRATEGY,
+                                 "fusion_explain": _fmt_fusion_explain(fusion_detail, ranked, n=3)},
                          elapsed_ms=elapsed)
         _append_step(state, step)
         return {"ranked": ranked, "steps": [step]}

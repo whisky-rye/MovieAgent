@@ -3,6 +3,11 @@
 不依赖 DB / Ollama / 向量库，仅校验排序层逻辑。
 运行：.venv/Scripts/python.exe -u tests/test_rrf.py
 """
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from retrieval.candidates import Candidate, split_genres
 from ranker.scorer import fuse, _quality_pref
 from ranker.rrf import rrf_fuse
