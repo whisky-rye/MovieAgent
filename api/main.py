@@ -22,6 +22,7 @@ from agent.graph import build_agent
 from retrieval.candidates import Candidate
 from api.cache import get_cache, cache_key
 from api.ratelimit import get_limiter, RateLimited
+from agent.memory import get_memory_store
 from config.settings import settings
 
 app = FastAPI(title="影片推荐智能体 API", version="0.1.0")
@@ -105,6 +106,7 @@ def health():
         "service": "movie-agent-api",
         "version": app.version,
         "cache_backend": get_cache().backend(),
+        "memory_backend": get_memory_store().backend(),
     }
 
 

@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     REDIS_TTL: int = 300         # 召回结果缓存 TTL（秒）
     LANGSMITH_API_KEY: str = ""
 
+    # ---- 偏好记忆后端（file / redis / fallback；fallback = Redis 优先 + file 兜底） ----
+    MEMORY_BACKEND: str = "fallback"    # fallback（默认）| redis | file
+    MEMORY_FILE_ROOT: str = "data/memory"
+
     # ---- 内容安全护栏（P5 补充：敏感拒答 / 越域引导） ----
     GUARDRAIL_ENABLED: bool = True          # 总开关；False 则全部放行
     GUARDRAIL_BLOCK_OFFTOPIC: bool = True   # 越域（非影视）是否引导；False 则交给 Agent 降级处理

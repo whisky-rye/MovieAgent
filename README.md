@@ -99,9 +99,9 @@ curl -N -X POST http://127.0.0.1:8000/chat \
 ### 4.3 `GET /health` — 健康检查
 ```bash
 curl http://127.0.0.1:8000/health
-# {"status":"ok","service":"movie-agent-api","version":"0.1.0","cache_backend":"redis"}
+# {"status":"ok","service":"movie-agent-api","version":"0.1.0","cache_backend":"redis","memory_backend":"redis"}
 ```
-`cache_backend` 一行即可观测 P4.2 兜底状态（`redis` / `local`）。
+`cache_backend` / `memory_backend` 两行即可分别观测 P4.2 缓存与偏好记忆的兜底状态（`redis` / `local` / `file`）。
 
 ---
 
@@ -109,6 +109,15 @@ curl http://127.0.0.1:8000/health
 `api/cache.py` 的 `DualCache`：**Redis 优先**（`protocol=2` 兼容老版本 3.x），连接/读写异常自动回退**进程内 TTL 缓存**（默认 300s）。
 - 仅 `/recommend` 命中缓存；同参二次请求 `cached=true` 秒回。
 - Redis 故障/未启动 → 自动 `backend=local`，主链路不受影响（已单测验证）。
+
+---
+
+## 5.1 偏好记忆后端（Redis 优先 + file 兜底）
+`agent/memory.py` 的 `FallbackMemoryStore` 与 `DualCache` 同思路：**Redis 优先，不可达时自动回退本地文件 JSON（`data/memory/{user_id}.json`）**，绝不阻塞主推荐链路。
+- 后端三选一，由 `MEMORY_BACKEND` 控制：`fallback`（默认，Redis 优先 + file 兜底）/`redis`（仅 Redis）/`file`（仅文件，纯离线）。
+- 启动 `ping` 探测 Redis；连不上 → `backend=file` 全程走文件。每次 `load/save` 若 Redis 抛异常，自动回退文件。
+- `load` 在 Redis 返回空（新用户/迁移期）时额外回退文件，**兼容此前 file 存量数据**（如 `alice`/`demo`），切换后端不丢历史偏好。
+- Redis 以 `mem:{user_id}` 为 key 持久化整份 JSON（无 TTL，长存）；连接方式复用 `REDIS_*`，同样 `protocol=2` 兼容老版本。
 
 ---
 
@@ -181,6 +190,9 @@ REDIS_PORT=6379
 REDIS_DB=0
 REDIS_PASSWORD=
 REDIS_TTL=300
+# 偏好记忆后端（fallback=Redis 优先 + file 兜底；redis 不可达自动走 file）
+MEMORY_BACKEND=fallback
+MEMORY_FILE_ROOT=data/memory
 # 内容安全护栏（P5 补充）
 GUARDRAIL_ENABLED=true
 GUARDRAIL_BLOCK_OFFTOPIC=true
