@@ -38,6 +38,7 @@ def chat_strong(**kwargs):
     ollama 模式强制 think=False（Ollama 0.5+ 支持）；云端模式 reasoning 在
     reasoning_content，content 已是最终答案，strip_think 幂等清洗即可。
     """
+    meta = {k: kwargs.pop(k) for k in ("user_id", "request_id") if k in kwargs}
     if _is_cloud():
         return FailoverChatModel(
             models=settings.cloud_strong_chain,
@@ -45,6 +46,8 @@ def chat_strong(**kwargs):
             temperature=0.3,
             extra_body=_cloud_extra_body(),
             local_fallback_model=settings.CLOUD_LLM_LOCAL_FALLBACK,
+            tier="strong",
+            **meta,
             **kwargs,
         )
     return ChatOllama(
@@ -62,6 +65,7 @@ def chat_light(**kwargs):
 
     ollama 模式同样关闭思维链（见 chat_strong 说明），意图解析毫秒级。
     """
+    meta = {k: kwargs.pop(k) for k in ("user_id", "request_id") if k in kwargs}
     if _is_cloud():
         return FailoverChatModel(
             models=settings.cloud_light_chain,
@@ -69,6 +73,8 @@ def chat_light(**kwargs):
             temperature=0.1,
             extra_body=_cloud_extra_body(),
             local_fallback_model=settings.CLOUD_LLM_LOCAL_FALLBACK,
+            tier="light",
+            **meta,
             **kwargs,
         )
     return ChatOllama(

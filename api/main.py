@@ -9,15 +9,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import re
 import threading
 import time
+import uuid
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from config.logging_setup import setup_logging
 from agent.graph import build_agent
 from retrieval.candidates import Candidate
 from api.cache import get_cache, cache_key
@@ -25,7 +29,47 @@ from api.ratelimit import get_limiter, RateLimited
 from agent.memory import get_memory_store
 from config.settings import settings
 
+setup_logging()  # 集中式结构化日志（JSON 行 + 滚动文件 + 专用 llm_calls.log）
+logger_api = logging.getLogger("movie_agent.api")
+
 app = FastAPI(title="影片推荐智能体 API", version="0.1.0")
+
+
+@app.middleware("http")
+async def log_http_requests(request: Request, call_next):
+    """HTTP 访问日志（结构化）：方法/路径/用户/状态码/耗时；query 由 ACCESS_LOG_BODY 控制。
+    统一生成 request_id（写入 request.state），供 recommend/chat 串联到云端 API 日志。"""
+    t0 = time.time()
+    rid = uuid.uuid4().hex[:12]
+    request.state.request_id = rid
+    uid = "-"
+    query = None
+    if request.method == "POST" and request.url.path in ("/recommend", "/chat"):
+        try:
+            body = await request.body()  # Starlette 会缓存，端点仍可读取
+            data = json.loads(body)
+            uid = data.get("user_id", "-")
+            query = data.get("query")
+        except Exception:
+            pass
+    response = await call_next(request)
+    latency_ms = int((time.time() - t0) * 1000)
+    extra = {"event": "http_request", "method": request.method, "path": request.url.path,
+             "status_code": response.status_code,
+             "client": request.client.host if request.client else "-",
+             "user_id": uid, "request_id": rid, "latency_ms": latency_ms}
+    if settings.ACCESS_LOG_BODY and query is not None:
+        extra["query"] = query
+    logger_api.info("http_request", extra=extra)
+    return response
+
+
+logger_api.info(
+    "服务启动", extra={"event": "startup", "env": settings.APP_ENV,
+    "llm_provider": settings.LLM_PROVIDER, "memory_backend": get_memory_store().backend(),
+    "cache_backend": get_cache().backend(), "guardrail": settings.GUARDRAIL_ENABLED,
+    "ratelimit": settings.RATELIMIT_ENABLED, "log_body": settings.LLM_LOG_BODY},
+)
 
 # 模块级编译一次，所有请求复用（避免每次重新构图）
 _AGENT = build_agent()
@@ -52,7 +96,7 @@ def _candidate_to_dict(c: Candidate) -> dict:
     }
 
 
-def _run(query: str, user_id: str) -> dict:
+def _run(query: str, user_id: str, request_id: str = "") -> dict:
     """同步跑 Agent，返回完整 state（answer + ranked 候选）。
 
     护栏（P5 补充）：在锁之前先做内容安全判定——命中敏感/越域直接返回，
@@ -60,8 +104,16 @@ def _run(query: str, user_id: str) -> dict:
     """
     from agent.guardrail import check_guardrail
 
+    if not request_id:
+        request_id = uuid.uuid4().hex[:12]
+
     g = check_guardrail(query)
     if g.action != "allow":
+        logger_api.warning(
+            "guardrail 拦截（不进 Agent、不耗额度）",
+            extra={"event": "guardrail", "action": g.action, "category": g.category,
+                   "user_id": user_id, "request_id": request_id, "query": query},
+        )
         return {
             "answer": g.message,
             "intent": "guardrail",
@@ -74,10 +126,15 @@ def _run(query: str, user_id: str) -> dict:
     if settings.RATELIMIT_ENABLED:
         ok, retry_after = get_limiter().consume(user_id)
         if not ok:
+            logger_api.warning(
+                "rate_limited 限流触发",
+                extra={"event": "rate_limited", "user_id": user_id,
+                       "request_id": request_id, "retry_after": retry_after},
+            )
             raise RateLimited(retry_after)
 
     with _RUN_LOCK:
-        result = _AGENT.invoke({"user_id": user_id, "query": query})
+        result = _AGENT.invoke({"user_id": user_id, "query": query, "request_id": request_id})
     ranked = result.get("ranked", []) or []
     return {
         "answer": result.get("answer", ""),
@@ -111,7 +168,7 @@ def health():
 
 
 @app.post("/recommend")
-def recommend(req: RecommendReq):
+def recommend(req: RecommendReq, request: Request):
     # P4.2：缓存优先（Redis / 进程内兜底），命中直接返回
     cache = get_cache()
     ck = cache_key(req.query, req.user_id, str(req.top_k))
@@ -120,11 +177,18 @@ def recommend(req: RecommendReq):
         out = dict(hit)
         out["cached"] = True
         out["cache_backend"] = cache.backend()
+        logger_api.info(
+            "recommend 缓存命中", extra={"event": "recommend", "user_id": req.user_id,
+            "request_id": request.state.request_id, "cached": True,
+            "cache_backend": cache.backend(), "intent": out.get("intent"),
+            "count": out.get("count")},
+        )
         return out
 
+    request_id = request.state.request_id
     t0 = time.time()
     try:
-        state = _run(req.query, req.user_id)
+        state = _run(req.query, req.user_id, request_id=request_id)
     except RateLimited as e:  # 限流触发：标准 429 + Retry-After
         raise HTTPException(
             status_code=429,
@@ -132,11 +196,16 @@ def recommend(req: RecommendReq):
             headers={"Retry-After": str(max(1, int(e.retry_after)))},
         )
     except Exception as e:  # noqa: BLE001 - 接口层兜底，向上抛 500
+        logger_api.exception(
+            "recommend 失败", extra={"event": "api_error", "user_id": req.user_id,
+            "request_id": request_id, "query": req.query},
+        )
         raise HTTPException(status_code=500, detail=f"推荐失败: {e}")
     items = state["items"][: req.top_k]
     resp = {
         "query": req.query,
         "user_id": req.user_id,
+        "request_id": request_id,
         "intent": state["intent"],
         "answer": state["answer"],
         "count": len(items),
@@ -146,20 +215,32 @@ def recommend(req: RecommendReq):
         "cache_backend": cache.backend(),
         "guardrail": state.get("guardrail", {"action": "allow", "category": "ok", "reason": ""}),
     }
+    logger_api.info(
+        "recommend 完成", extra={"event": "recommend", "user_id": req.user_id,
+        "request_id": request_id, "cached": False, "cache_backend": cache.backend(),
+        "intent": state["intent"], "count": len(items),
+        "elapsed_ms": resp["elapsed_ms"],
+        "guardrail_action": resp["guardrail"]["action"]},
+    )
     cache.set(ck, resp)
     return resp
 
 
 @app.post("/chat")
-async def chat(req: ChatReq):
+async def chat(req: ChatReq, request: Request):
     """流式对话：Agent 同步调用放到线程，避免阻塞事件循环；按句推送（伪流式体验）。"""
+    request_id = request.state.request_id
     async def gen():
         try:
-            state = await asyncio.to_thread(_run, req.query, req.user_id)
+            state = await asyncio.to_thread(_run, req.query, req.user_id, request_id)
         except RateLimited as e:  # 流式接口无法回 429 状态码，推提示文本
             yield f"请求过于频繁，请 {max(1, int(e.retry_after))} 秒后再试。\n"
             return
         except Exception as e:  # noqa: BLE001
+            logger_api.exception(
+                "chat 失败", extra={"event": "api_error", "user_id": req.user_id,
+                "request_id": request_id, "query": req.query},
+            )
             yield f"抱歉，出错了：{e}\n"
             return
         answer = state.get("answer", "")

@@ -17,6 +17,7 @@
 重置：设置环境变量 `CLOUD_LLM_RESET_QUOTA=1` 后启动即清空熔断记录。
 """
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -25,6 +26,8 @@ from typing import Any, Dict, List
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 from config.settings import settings
+
+logger = logging.getLogger("movie_agent.llm")
 
 _LOG_DIR = Path(__file__).resolve().parents[1] / "log"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -68,6 +71,97 @@ def _save_exhausted(s: set) -> None:
         )
     except Exception:
         pass
+
+
+def _extract_usage(result) -> dict:
+    """从 LangChain ChatResult.llm_output 提取 token 用量（兼容 OpenAI/Anthropic 风格）。
+
+    返回 prompt_tokens / completion_tokens / total_tokens / cached_tokens。
+    cached_tokens 优先取 prompt_tokens_details.cached_tokens（OpenAI 提示缓存命中计数）。
+    """
+    try:
+        llm_output = getattr(result, "llm_output", None) or {}
+        u = llm_output.get("token_usage", {}) or {}
+    except Exception:
+        u = {}
+    prompt = u.get("prompt_tokens")
+    completion = u.get("completion_tokens")
+    total = u.get("total_tokens")
+    cached = 0
+    details = u.get("prompt_tokens_details") or {}
+    if isinstance(details, dict):
+        cached = details.get("cached_tokens") or 0
+    if not cached:
+        cached = u.get("cached_tokens") or 0
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "cached_tokens": cached,
+    }
+
+
+def _last_human_text(messages) -> str:
+    """取最后一条 HumanMessage 的文本（作为「输入词」）。"""
+    try:
+        for m in reversed(messages or []):
+            cls = m.__class__.__name__
+            if getattr(m, "type", None) == "human" or cls == "HumanMessage":
+                c = m.content
+                if isinstance(c, list):
+                    c = " ".join(str(x) for x in c)
+                return str(c)
+    except Exception:
+        pass
+    return ""
+
+
+def _output_text(result) -> str:
+    """取生成结果的文本（作为「输出词」）。"""
+    try:
+        gens = getattr(result, "generations", None) or []
+        if gens:
+            return str(gens[0].message.content)
+    except Exception:
+        pass
+    return ""
+
+
+def _log_llm_call(model, provider, tier, messages, result, latency_ms,
+                  user_id="", request_id=""):
+    """结构化记录一次云端/本地 LLM 调用：输入/输出 token、缓存 token、耗时、正文（受开关）。
+
+    始终记录 token 计数与字符数；仅当 settings.LLM_LOG_BODY=True 时附带输入/输出原文，
+    满足「请求体/响应体可配置开关」——开则记录、关则不具体记录。
+    """
+    usage = _extract_usage(result)
+    in_text = _last_human_text(messages)
+    out_text = _output_text(result)
+    extra = {
+        "event": "llm_call",
+        "provider": provider,
+        "tier": tier,
+        "model": model,
+        "user_id": user_id or "-",
+        "request_id": request_id or "-",
+        "input_tokens": usage["prompt_tokens"],
+        "output_tokens": usage["completion_tokens"],
+        "cached_tokens": usage["cached_tokens"],
+        "cache_read": (usage["cached_tokens"] or 0) > 0,
+        "total_tokens": usage["total_tokens"],
+        "latency_ms": latency_ms,
+        "input_chars": len(in_text),
+        "output_chars": len(out_text),
+    }
+    if settings.LLM_LOG_BODY:
+        extra["input_text"] = in_text
+        extra["output_text"] = out_text
+    logger.info(
+        "llm_call provider=%s tier=%s model=%s in=%s out=%s cached=%s total=%s lat=%sms",
+        provider, tier, model, usage["prompt_tokens"], usage["completion_tokens"],
+        usage["cached_tokens"], usage["total_tokens"], latency_ms,
+        extra=extra,
+    )
 
 
 _EXHAUSTED: set = _load_exhausted()
@@ -123,6 +217,9 @@ class FailoverChatModel(BaseChatModel):
     extra_body: Dict[str, Any] = {}
     request_timeout: int = 180
     local_fallback_model: str = ""  # 本地兜底模型（Ollama）；空 = 不做本地兜底
+    tier: str = "strong"            # strong（解释/对话）| light（意图/重排），用于日志区分
+    user_id: str = ""               # 透传请求用户，便于按用户维度排查
+    request_id: str = ""            # 透传请求 ID，便于链路串联
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -152,6 +249,8 @@ class FailoverChatModel(BaseChatModel):
         candidates = [m for m in self.models if m not in _EXHAUSTED]
         if not candidates:
             _log("ALL_EXHAUSTED 全部模型已熔断，回退到完整列表兜底")
+            logger.error("ALL_EXHAUSTED 全部模型已熔断，回退完整列表",
+                         extra={"event": "all_exhausted", "tier": self.tier})
             candidates = list(self.models)
         cap = self.max_fallbacks + 1          # primary + N 次降级
         tried = 0
@@ -159,27 +258,50 @@ class FailoverChatModel(BaseChatModel):
         for model in candidates:
             tried += 1
             try:
+                t0 = time.time()
                 result = self._try_one(model, messages, stop, run_manager, kwargs, async_mode)
-                _log(f"OK model={model}")
+                latency_ms = int((time.time() - t0) * 1000)
+                _log(f"OK model={model} lat={latency_ms}ms")
+                _log_llm_call(model, "cloud", self.tier, messages, result, latency_ms,
+                              self.user_id, self.request_id)
                 return result
             except Exception as e:
                 if _is_quota_exhausted(e):
                     _EXHAUSTED.add(model)
                     _save_exhausted(_EXHAUSTED)
                     _log(f"QUOTA_EXHAUSTED model={model} -> 已标记熔断并持久化，后续跳过。reason={_safe(e)}")
+                    logger.error("QUOTA_EXHAUSTED 模型免费额度耗尽已熔断",
+                                 extra={"event": "quota_exhausted", "model": model,
+                                        "tier": self.tier, "reason": _safe(e)})
                 else:
                     _log(f"TRANSIENT_FAIL model={model} err={_safe(e)}")
+                    logger.warning("TRANSIENT_FAIL 模型瞬时失败触发降级",
+                                   extra={"event": "model_fail", "model": model,
+                                          "tier": self.tier, "err": _safe(e)})
                 last_err = e
                 if tried >= cap:
                     _log(f"MAX_FALLBACKS_EXCEEDED 已触发 {tried - 1} 次降级，放弃")
+                    logger.error("MAX_FALLBACKS_EXCEEDED 降级次数用尽，放弃",
+                                 extra={"event": "max_fallbacks", "tier": self.tier, "tried": tried})
                     break
         # 云端本档全部失败：按环境决定是否回退本地 Ollama
         if self.local_fallback_model and settings.APP_ENV.lower() == "local":
             try:
                 _log(f"LOCAL_FALLBACK 云端全失败，回退本地 Ollama model={self.local_fallback_model}")
-                return self._try_local(messages, stop, run_manager, kwargs, async_mode)
+                logger.warning("LOCAL_FALLBACK 云端全失败，回退本地 Ollama",
+                               extra={"event": "local_fallback", "model": self.local_fallback_model,
+                                      "tier": self.tier})
+                t0 = time.time()
+                result = self._try_local(messages, stop, run_manager, kwargs, async_mode)
+                latency_ms = int((time.time() - t0) * 1000)
+                _log_llm_call(self.local_fallback_model, "ollama", self.tier, messages,
+                              result, latency_ms, self.user_id, self.request_id)
+                return result
             except Exception as le:
                 _log(f"LOCAL_FALLBACK_FAIL model={self.local_fallback_model} err={_safe(le)}")
+                logger.error("LOCAL_FALLBACK_FAIL 本地兜底也失败",
+                             extra={"event": "local_fallback_fail", "model": self.local_fallback_model,
+                                    "tier": self.tier, "err": _safe(le)})
                 last_err = le  # 本地兜底也失败：以本地错误向上抛（云端错误已记录）
         raise last_err or RuntimeError("FailoverChatModel: 无可用模型（云端与本地兜底均失败）")
 

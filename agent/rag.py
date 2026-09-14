@@ -17,7 +17,7 @@ def build_context(ranked: list[Candidate], top_n: int = 8) -> str:
 
 
 def generate_explanation(query: str, ranked: list[Candidate],
-                         prefs: dict, user_id: str) -> str:
+                         prefs: dict, user_id: str, request_id: str = "") -> str:
     """端到端：检索上下文 + 强档 LLM -> 解释性推荐语。
 
     空响应兜底：本地小模型偶发返回空/异常，此时用候选拼模板解说，
@@ -27,7 +27,7 @@ def generate_explanation(query: str, ranked: list[Candidate],
     prefs_s = "，".join(prefs.get("genres", [])) or "（暂无）"
     prompt = EXPLAIN_PROMPT.format(query=query or "（未明确）",
                                    prefs=prefs_s, context=context)
-    llm = chat_strong()
+    llm = chat_strong(user_id=user_id, request_id=request_id)
     try:
         resp = llm.invoke([SystemMessage(content="你是影片推荐解说员，中文作答。"),
                            HumanMessage(content=prompt)])

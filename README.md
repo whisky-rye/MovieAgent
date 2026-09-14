@@ -121,6 +121,21 @@ curl http://127.0.0.1:8000/health
 
 ---
 
+## 5.2 结构化日志（精细化可观测）
+集中式日志（`config/logging_setup.py`）——**JSON 单行 + 滚动文件**，覆盖告警/错误/请求/云端 API 四类维度：
+
+- `log/app.log`：主日志（控制台同款），含全部 `movie_agent.*` 日志（缓存/记忆/接口/LLM/告警）。
+- `log/llm_calls.log`：**专用云端 API 调用日志**（`logger=movie_agent.llm`），排查「请求云端 api」细节时单独 grep 即可。
+- 日志级别、目录由 `LOG_LEVEL` / `LOG_DIR` 控制。
+
+**云端 API 调用日志（`event=llm_call`）必记字段**：`provider`(cloud/ollama)、`tier`(strong/light)、`model`、`user_id`、`request_id`、输入/输出 token（`input_tokens`/`output_tokens`/`total_tokens`）、**缓存 token 与是否命中缓存**（`cached_tokens`/`cache_read`）、**请求耗时**（`latency_ms`）、输入/输出字符数（`input_chars`/`output_chars`）。
+**请求体/响应体开关**：`LLM_LOG_BODY=true` 时额外记录 `input_text`/`output_text` 原文；默认 `false`（只记字符数，不记原文，避免大文本/敏感信息落盘）。
+- 告警/错误：`event=quota_exhausted`(免费额度熔断·ERROR)、`model_fail`(瞬时失败降级·WARNING)、`max_fallbacks`(降级用尽·ERROR)、`local_fallback`/`local_fallback_fail`、`all_exhausted`；接口层 `event=api_error`(异常·带堆栈)。
+
+**HTTP 访问日志**（`api/main.py` 中间件，`event=http_request`）：方法/路径/用户/状态码/耗时，并生成 `request_id` 贯穿 HTTP→LLM→recommend 日志便于链路串联；护栏拦截（`event=guardrail`）、限流（`event=rate_limited`）、缓存命中（`event=recommend, cached=true`）均单独留痕。`ACCESS_LOG_BODY=true` 时附带请求 query 片段。
+
+---
+
 ## 6. 内容安全护栏（P5 补充：敏感拒答 / 越域引导）
 
 `agent/guardrail.py` 是合规第一道闸门，在 Agent 调用**之前**（锁之外）判定；命中拦截**不进入 Agent、不消耗云端额度**。
@@ -193,6 +208,11 @@ REDIS_TTL=300
 # 偏好记忆后端（fallback=Redis 优先 + file 兜底；redis 不可达自动走 file）
 MEMORY_BACKEND=fallback
 MEMORY_FILE_ROOT=data/memory
+# 日志（精细化可观测；见 5.2 节）
+LOG_DIR=log
+LOG_LEVEL=INFO
+LLM_LOG_BODY=false          # true=记录云端 API 输入/输出原文；false=只记字符数
+ACCESS_LOG_BODY=false       # true=记录 HTTP 请求/响应体片段
 # 内容安全护栏（P5 补充）
 GUARDRAIL_ENABLED=true
 GUARDRAIL_BLOCK_OFFTOPIC=true

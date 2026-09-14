@@ -13,6 +13,7 @@ from retrieval.candidates import Candidate
 
 class AgentState(TypedDict, total=False):
     user_id: str
+    request_id: str                # 单次请求链路 ID（用于云端 API 日志串联）
     query: str                      # 用户原始输入
     intent: str                     # recommend | similar | board | explain | preference
     slots: dict                     # 意图解析出的结构化槽位（query/genres/country/...）

@@ -33,7 +33,7 @@ def _extract_json(text: str) -> dict | None:
 def _parse_intent(state: AgentState) -> AgentState:
     uid = state.get("user_id", "default")
     query = state.get("query", "")
-    llm = chat_light()
+    llm = chat_light(user_id=uid, request_id=state.get("request_id", ""))
     slots = None
     try:
         resp = llm.invoke([SystemMessage(content=INTENT_PROMPT),
@@ -151,7 +151,8 @@ def _generate(state: AgentState) -> AgentState:
         return {"answer": f"抱歉，检索出了点问题：{state['error']}。可换个说法再试。"}
     ranked = state.get("ranked", [])
     prefs = get_memory_store().get_prefs(uid)
-    answer = generate_explanation(state.get("query", ""), ranked, prefs, uid)
+    answer = generate_explanation(state.get("query", ""), ranked, prefs, uid,
+                                  request_id=state.get("request_id", ""))
     return {"answer": answer}
 
 

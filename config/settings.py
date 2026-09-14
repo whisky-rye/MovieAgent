@@ -69,6 +69,14 @@ class Settings(BaseSettings):
     MEMORY_BACKEND: str = "fallback"    # fallback（默认）| redis | file
     MEMORY_FILE_ROOT: str = "data/memory"
 
+    # ---- 日志（精细化可观测：JSON 行 + 滚动文件 + 专用云端 API 调用日志） ----
+    LOG_DIR: str = "log"                # 运行期日志目录（.gitignore 已忽略）
+    LOG_LEVEL: str = "INFO"             # DEBUG | INFO | WARNING | ERROR
+    # 云端 API 请求体/响应体（输入词/输出词文本）记录开关：True=记原文，False=只记字符数不记原文
+    LLM_LOG_BODY: bool = False
+    # HTTP 请求/响应体记录开关（/recommend、/chat 的 query/answer 片段）；默认关，避免大文本落盘
+    ACCESS_LOG_BODY: bool = False
+
     # ---- 内容安全护栏（P5 补充：敏感拒答 / 越域引导） ----
     GUARDRAIL_ENABLED: bool = True          # 总开关；False 则全部放行
     GUARDRAIL_BLOCK_OFFTOPIC: bool = True   # 越域（非影视）是否引导；False 则交给 Agent 降级处理
