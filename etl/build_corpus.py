@@ -96,7 +96,8 @@ def _build_imdb():
     with eng.connect() as c:
         rows = c.execute(text(
             "SELECT m.imdb_id, m.title_text_cn, m.title_text, m.release_date_year, m.genres, m.country, "
-            "m.director_name, t.plot_text, t.plot_keywords, t.tagline "
+            "m.director_name, m.rate_agg, m.rate_votes, "
+            "t.plot_text, t.plot_keywords, t.tagline "
             "FROM imdb_main m LEFT JOIN imdb_text t ON m.imdb_id = t.imdb_id"
         )).mappings().all()
     for r in rows:
@@ -127,8 +128,8 @@ def _build_imdb():
                 "source": "imdb",
                 "title": title,
                 "year": _to_int(r["release_date_year"]),
-                "rating": 0.0,  # 本样本 imdb_main 无评分字段，留待全量补齐
-                "rating_count": 0,
+                "rating": float(r["rate_agg"] or 0.0),      # imdb_main.rate_agg（IMDb 加权评分）
+                "rating_count": int(r["rate_votes"] or 0),  # imdb_main.rate_votes（评分人数）
                 "country": _clean(r["country"]),
                 "genres": _clean(r["genres"]),
                 "genres_list": _split_genres(r["genres"]),

@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # ollama：本地 bge-m3，零成本、零联网、最稳；开发期默认。
     # cloud ：阿里百炼 compatible-mode /v1/embeddings（qwen3.7-text-embedding 等），
     #         需联网+额度，中文语义/维度可调，适合对齐线上检索分布。
-    EMBED_PROVIDER: str = "cloud"     # ollama | cloud
+    EMBED_PROVIDER: str = "ollama"     # ollama | cloud
     # 向量维度（建库/召回必须一致）。本地 bge-m3=1024；云端 qwen 嵌入默认 1024 亦可配 512/768/1536。
     EMBED_DIM: int = 1024
     # 云端嵌入接入（阿里百炼）：默认复用 CLOUD_LLM_BASE_URL 同一 compatible-mode 网关与 API Key
@@ -81,7 +81,12 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_PASSWORD: str = ""
     REDIS_TTL: int = 300         # 召回结果缓存 TTL（秒）
-    LANGSMITH_API_KEY: str = ""
+    # ---- LangSmith 全链路追踪（P4.4） ----
+    # 启用后：LangChain/LangGraph 的 LLM 调用与图节点 invoke 自动上报到 LangSmith。
+    LANGSMITH_API_KEY: str = ""          # 默认空 = 关闭；填入后配合 LANGSMITH_TRACING 生效
+    LANGSMITH_TRACING: bool = False     # True 时启用；False 或 Key 缺失则自动退化为关闭
+    LANGSMITH_PROJECT: str = "movie_agent"
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
 
     # ---- 偏好记忆后端（file / redis / fallback；fallback = Redis 优先 + file 兜底） ----
     MEMORY_BACKEND: str = "file"    # fallback（默认）| redis | file

@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from config.logging_setup import setup_logging
+from config.langsmith_setup import setup_langsmith, run_metadata
 from agent.graph import build_agent
 from retrieval.candidates import Candidate
 from api.cache import get_cache, cache_key
@@ -32,6 +33,7 @@ from agent.guardrail import check_guardrail
 from config.settings import settings
 
 setup_logging()  # 集中式结构化日志（JSON 行 + 滚动文件 + 专用 llm_calls.log）
+_LS_ENABLED = setup_langsmith()  # P4.4：LangSmith 全链路追踪（按开关写入环境变量；缺 Key 自动退化关闭）
 logger_api = logging.getLogger("movie_agent.api")
 
 app = FastAPI(title="影片推荐智能体 API", version="0.1.0")
@@ -70,7 +72,9 @@ logger_api.info(
     "服务启动", extra={"event": "startup", "env": settings.APP_ENV,
     "llm_provider": settings.LLM_PROVIDER, "memory_backend": get_memory_store().backend(),
     "cache_backend": get_cache().backend(), "guardrail": settings.GUARDRAIL_ENABLED,
-    "ratelimit": settings.RATELIMIT_ENABLED, "log_body": settings.LLM_LOG_BODY},
+    "ratelimit": settings.RATELIMIT_ENABLED, "log_body": settings.LLM_LOG_BODY,
+    "langsmith_tracing": _LS_ENABLED,
+    "langsmith_project": settings.LANGSMITH_PROJECT or "-"},
 )
 
 # 模块级编译一次，所有请求复用（避免每次重新构图）
@@ -136,13 +140,16 @@ def _run(query: str, user_id: str, request_id: str = "") -> dict:
             raise RateLimited(retry_after)
 
     with _RUN_LOCK:
-        result = _AGENT.invoke({
-            "user_id": user_id,
-            "query": query,
-            "request_id": request_id,
-            "steps": [],
-            "thinking": {},
-        })
+        result = _AGENT.invoke(
+            {
+                "user_id": user_id,
+                "query": query,
+                "request_id": request_id,
+                "steps": [],
+                "thinking": {},
+            },
+            config={"metadata": run_metadata(user_id, request_id)},
+        )
     ranked = result.get("ranked", []) or []
     return {
         "answer": result.get("answer", ""),
@@ -332,7 +339,10 @@ async def recommend_stream(req: RecommendReq, request: Request):
         nonlocal final
         with _RUN_LOCK:
             try:
-                final = _AGENT.invoke(init_state)
+                final = _AGENT.invoke(
+                    init_state,
+                    config={"metadata": run_metadata(req.user_id, request_id)},
+                )
             except Exception as e:  # noqa: BLE001
                 logger_api.exception("recommend/stream 运行异常",
                                      extra={"event": "api_error", "user_id": req.user_id,
