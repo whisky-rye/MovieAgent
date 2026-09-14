@@ -79,6 +79,20 @@ python -m etl.build_chroma
        "movies":[{"title":"Spider-Man","year":2002,"genres":["Action","Sci-Fi"],"country":"United States","rating":0,"rating_count":0,"intro":"…"}]}
     ]
   },
+  "steps":[
+    {"order":1,"node":"parse_intent","kind":"llm","summary":"意图识别：recommend",
+     "detail":{"intent":"recommend","slots":{...}},"elapsed_ms":1234,
+     "thinking":"…route 步骤（parse_intent）的模型思考过程…"},
+    {"order":2,"node":"plan","kind":"route","summary":"规划工具链：['search_by_text']",
+     "detail":{"plan":["search_by_text"]},"elapsed_ms":3,"thinking":""},
+    {"order":3,"node":"execute","kind":"retrieval","summary":"多路召回 20 条 → 重排 20 条",
+     "detail":{"plan":["search_by_text"],"recall_counts":{"search_by_text":20},"ranked_count":20},
+     "elapsed_ms":560,"thinking":""},
+    {"order":4,"node":"generate","kind":"generate","summary":"生成推荐解说（基于 20 部候选）",
+     "detail":{"candidate_count":20},"elapsed_ms":61000,
+     "thinking":"…generate 步骤的解说构思思考过程…"}
+  ],
+  "thinking":{"route":"…parse_intent 的深度思考…","generate":"…generate 的解说构思思考…"},
   "elapsed_ms":54029,"cached":false,"cache_backend":"redis"
 }
 ```
@@ -119,6 +133,31 @@ curl http://127.0.0.1:8000/health
 # {"status":"ok","service":"movie-agent-api","version":"0.1.0","cache_backend":"redis","memory_backend":"redis"}
 ```
 `cache_backend` / `memory_backend` 两行即可分别观测 P4.2 缓存与偏好记忆的兜底状态（`redis` / `local` / `file`）。
+
+### 4.4 `POST /recommend/stream` — 流式推荐（SSE）
+在 `/recommend` 基础上增加**流式兼容**：同一套 Agent、护栏、限流，但实时把「工具链步骤」「大模型深度思考」「答案 token」逐条推给前端（SSE，`text/event-stream`），最后以 `done` 事件给出完整结构化结果。专为前端流式渲染（步骤时间轴 + 思考展开 + 正文逐字）设计。
+
+请求体与 `/recommend` 相同：`{"query":"...","user_id":"...","top_k":5}`。
+
+**事件协议**（每条 `event: <type>\ndata: {json}\n\n`）：
+| event | data 字段 | 含义 |
+|-------|-----------|------|
+| `step` | `{order,node,kind,summary,detail,elapsed_ms,thinking?}` | 工具链一个节点的步骤记录（`kind`∈`llm`/`route`/`retrieval`/`generate`…） |
+| `thinking` | `{content}` | 大模型深度思考（`reasoning_content`）增量，随 `generate` 步骤实时流出 |
+| `token` | `{content}` | 答案正文 token 增量 |
+| `done` | `{intent,answer,items,sources,steps,thinking,elapsed_ms,request_id}` | 完整结果（与 `/recommend` 字段一致，含 `steps`/`thinking`） |
+| `error` | `{action,category?,message}` | 护栏拦截 / 限流 / 运行异常（同 `/recommend` 的 `guardrail` 字段） |
+
+`step` 与 `/recommend` 返回里的 `steps` 同构；`thinking` 的 `route`/`generate` 两段对应两处 LLM 调用。`done` 的 `steps`/`thinking` 为最终合集，前端可据此做「步骤时间轴 + 思考展开 + 正文流式」。
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/recommend/stream \
+  -H "Content-Type: application/json" -d @log/req.json
+# 终端依次收到：step ×N → token ×M（及期间 thinking 增量）→ done（完整 payload）
+```
+
+> **注意**：`/recommend/stream` **不读缓存**（实时链路追踪，每次真实跑 Agent）；并发仍走 `_RUN_LOCK` 单飞（见第 8 节），多个流会排队。护栏/限流在锁前判定，越域/限流直接 `error` 事件收尾。
+> 服务端不保留半程状态——前端负责把「已推步骤 + 当前 token」在刷新时续上。
 
 ---
 

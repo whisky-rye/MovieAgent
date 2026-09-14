@@ -5,6 +5,53 @@ from llm.client import chat_strong, strip_think
 from agent.prompt import EXPLAIN_PROMPT
 
 
+def _extract_thinking(msg) -> str:
+    """从一次 LLM 调用的结果（AIMessage）抽取「深度思考过程」。
+
+    兼容多种承载方式：
+    - LangChain >=0.2 的 AIMessage.reasoning_content 属性（Qwen/DeepSeek 等）
+    - additional_kwargs['reasoning_content'] / ['reasoningContent']
+    - response_metadata['reasoning_content']
+    本地 Ollama 若开启 think=True，思考在 content 的 <think> 标签内（由 strip_think 处理）。
+    """
+    if msg is None:
+        return ""
+    rc = getattr(msg, "reasoning_content", None)
+    if rc:
+        return rc
+    ak = getattr(msg, "additional_kwargs", None) or {}
+    rc = ak.get("reasoning_content") or ak.get("reasoningContent")
+    if rc:
+        return rc
+    rm = getattr(msg, "response_metadata", None) or {}
+    rc = rm.get("reasoning_content") or rm.get("reasoningContent")
+    if rc:
+        return rc
+    return ""
+
+
+def _chunk_thinking(chunk) -> str:
+    """从流式 chunk 抽取思考过程 delta。
+
+    兼容两种形态：
+    - AIMessageChunk（ChatOllama / 直接流式）
+    - ChatGenerationChunk（FailoverChatModel.stream 外层包装，思考在 .message 上）
+    """
+    if chunk is None:
+        return ""
+    msg = getattr(chunk, "message", None)  # ChatGenerationChunk
+    if msg is None:
+        msg = chunk                              # AIMessageChunk
+    rc = getattr(msg, "reasoning_content", None)
+    if rc:
+        return rc
+    ak = getattr(msg, "additional_kwargs", None) or {}
+    rc = ak.get("reasoning_content") or ak.get("reasoningContent")
+    if rc:
+        return rc
+    return ""
+
+
 def build_context(ranked: list[Candidate], top_n: int = 8) -> str:
     """把候选拼成可喂给 LLM 的检索上下文（标题/年份/类型/评分/简介）。"""
     lines = []
@@ -94,29 +141,68 @@ def source_one_liner(meta: dict) -> str:
     return f"\n\n〔信息来源〕{line}"
 
 
-def generate_explanation(query: str, ranked: list[Candidate],
-                         prefs: dict, user_id: str, request_id: str = ""):
-    """端到端：检索上下文 + 强档 LLM -> 解释性推荐语。
+def _fallback_explanation(query: str, ranked: list[Candidate], prefs_s: str) -> str:
+    """空响应兜底：本地小模型偶发返回空/异常时，用候选拼模板解说。"""
+    lines = [f"根据你的需求「{query or '好看的片子'}」，结合已记录偏好（{prefs_s}），为你挑出以下作品："]
+    for i, c in enumerate(ranked[:5], 1):
+        g = "/".join(c.genres[:3]) if c.genres else "未知"
+        r = f"{c.rating:.1f}" if c.rating else "未知"
+        lines.append(f"{i}. 《{c.title}》({c.year}) 类型:{g} 评分:{r}")
+    return "\n".join(lines)
 
-    空响应兜底：本地小模型偶发返回空/异常，此时用候选拼模板解说，
-    保证「永远有可解释 answer」，不让前端拿到空白。
+
+def _generate_rich(query: str, ranked: list[Candidate], prefs: dict,
+                   user_id: str, request_id: str = "",
+                   token_sink=None, thinking_sink=None):
+    """端到端：检索上下文 + 强档 LLM -> (解说文本, 思考过程)。
+
+    - token_sink/thinking_sink 为 None 时走非流式 invoke（/recommend 用）；
+    - 提供 sink 时走 llm.stream 实时推送答案 token 与思考 delta（/recommend/stream 用）。
+    任一失败都回退到模板解说，保证「永远有可解释 answer」。
     """
     context = build_context(ranked)
     prefs_s = "，".join(prefs.get("genres", [])) or "（暂无）"
     prompt = EXPLAIN_PROMPT.format(query=query or "（未明确）",
                                    prefs=prefs_s, context=context)
     llm = chat_strong(user_id=user_id, request_id=request_id)
+    answer_parts: list[str] = []
+    thinking_parts: list[str] = []
     try:
-        resp = llm.invoke([SystemMessage(content="你是影片推荐解说员，中文作答。"),
-                           HumanMessage(content=prompt)])
-        text = strip_think(resp.content).strip()
+        if token_sink is not None or thinking_sink is not None:
+            # 流式：逐 chunk 累积答案与思考 delta
+            for chunk in llm.stream([SystemMessage(content="你是影片推荐解说员，中文作答。"),
+                                     HumanMessage(content=prompt)]):
+                msg = getattr(chunk, "message", None)
+                c = (getattr(msg, "content", "") if msg is not None
+                     else getattr(chunk, "content", "")) or ""
+                if c:
+                    answer_parts.append(c)
+                    if token_sink:
+                        token_sink(c)
+                tk = _chunk_thinking(chunk)
+                if tk:
+                    thinking_parts.append(tk)
+                    if thinking_sink:
+                        thinking_sink(tk)
+            text = "".join(answer_parts).strip()
+        else:
+            resp = llm.invoke([SystemMessage(content="你是影片推荐解说员，中文作答。"),
+                               HumanMessage(content=prompt)])
+            text = strip_think(resp.content).strip()
+            thinking_parts.append(_extract_thinking(resp))
     except Exception:
         text = ""
+    thinking = "".join(thinking_parts).strip()
     if not text:
-        lines = [f"根据你的需求「{query or '好看的片子'}」，结合已记录偏好（{prefs_s}），为你挑出以下作品："]
-        for i, c in enumerate(ranked[:5], 1):
-            g = "/".join(c.genres[:3]) if c.genres else "未知"
-            r = f"{c.rating:.1f}" if c.rating else "未知"
-            lines.append(f"{i}. 《{c.title}》({c.year}) 类型:{g} 评分:{r}")
-        return "\n".join(lines)
+        text = _fallback_explanation(query, ranked, prefs_s)
+    return text, thinking
+
+
+def generate_explanation(query: str, ranked: list[Candidate],
+                         prefs: dict, user_id: str, request_id: str = ""):
+    """端到端：检索上下文 + 强档 LLM -> 解释性推荐语（非流式，返回 str）。
+
+    流式场景请直接用 `_generate_rich(..., token_sink=, thinking_sink=)`。
+    """
+    text, _ = _generate_rich(query, ranked, prefs, user_id, request_id)
     return text

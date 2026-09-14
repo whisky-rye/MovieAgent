@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk
 from langchain_openai import ChatOpenAI
 from config.settings import settings
 
@@ -200,6 +202,80 @@ def _is_quota_exhausted(err: Exception) -> bool:
     return False
 
 
+class ReasoningChatOpenAI(ChatOpenAI):
+    """ChatOpenAI 子类：把第三方网关（DashScope/阿里百炼等）返回的 reasoning_content
+    补回 additional_kwargs。
+
+    langchain-openai 1.x 默认只认官方 OpenAI，会丢弃 reasoning_content（见其文档
+    warning）。但 DashScope 的 Qwen3 推理模型确实在 message.reasoning_content 返回
+    思考过程。本子类在 _create_chat_result 里把它附加到 additional_kwargs——
+    由于流式 chunk 也经 _get_generation_chunk_from_completion 复用该字段，
+    因此「非流式 + 流式」两条路径都能拿到思考过程（供 /recommend 的 thinking 字段
+    与 /recommend/stream 的 thinking 事件使用）。
+    """
+
+    def _create_chat_result(self, response, generation_info=None):
+        result = super()._create_chat_result(response, generation_info)
+        try:
+            if isinstance(response, dict):
+                choices = response.get("choices") or []
+            else:
+                choices = getattr(response, "choices", None) or []
+            for gen, ch in zip(result.generations, choices):
+                rc = self._extract_reasoning(ch)
+                if rc:
+                    gen.message.additional_kwargs["reasoning_content"] = rc
+        except Exception:
+            pass
+        return result
+
+    @staticmethod
+    def _extract_reasoning(ch) -> str:
+        """从 choices[i] 抽取 reasoning_content（兼容完整 message 与流式 delta）。"""
+        if isinstance(ch, dict):
+            m = ch.get("message") or ch.get("delta") or {}
+            if isinstance(m, dict):
+                return m.get("reasoning_content") or ""
+            return getattr(m, "reasoning_content", None) or ""
+        for attr in ("delta", "message"):
+            obj = getattr(ch, attr, None)
+            if obj is not None:
+                rc = getattr(obj, "reasoning_content", None)
+                if rc:
+                    return rc
+        return ""
+
+    def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class,
+                                           base_generation_info=None):
+        """流式：把 delta.reasoning_content 补回 AIMessageChunk.additional_kwargs。
+
+        langchain-openai 的流式路径走 _convert_chunk_to_generation_chunk（而非
+        _create_chat_result），默认丢弃 reasoning_content；此处复用 _extract_reasoning
+        思路，从 choices[0].delta 提取后挂到 chunk 上，使 /recommend/stream 的
+        thinking 事件能拿到思考过程 delta。
+        """
+        gen = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info or {})
+        if gen is None:
+            return None
+        try:
+            choices = chunk.get("choices") if isinstance(chunk, dict) \
+                else getattr(chunk, "choices", None) or []
+            if choices:
+                delta = choices[0].get("delta") if isinstance(choices[0], dict) \
+                    else getattr(choices[0], "delta", None)
+                rc = None
+                if isinstance(delta, dict):
+                    rc = delta.get("reasoning_content")
+                else:
+                    rc = getattr(delta, "reasoning_content", None)
+                if rc and isinstance(gen.message, AIMessageChunk):
+                    gen.message.additional_kwargs["reasoning_content"] = rc
+        except Exception:
+            pass
+        return gen
+
+
 class FailoverChatModel(BaseChatModel):
     """云端模型顺序降级包装器：对业务层透明，实现 BaseChatModel 接口。
 
@@ -228,7 +304,7 @@ class FailoverChatModel(BaseChatModel):
         return "failover"
 
     def _build(self, model: str) -> ChatOpenAI:
-        return ChatOpenAI(
+        return ReasoningChatOpenAI(
             model=model,
             base_url=settings.CLOUD_LLM_BASE_URL,
             api_key=settings.CLOUD_LLM_API_KEY,
@@ -325,3 +401,82 @@ class FailoverChatModel(BaseChatModel):
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         return await self._run_failover(messages, stop, run_manager, kwargs, async_mode=True)
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        """同步流式降级：逐 chunk 透传首个可用模型；中途异常切下一模型，
+        末次仍失败则回退非流式产出单个 chunk，保证「至少有一段回复」。"""
+        candidates = [m for m in self.models if m not in _EXHAUSTED] or list(self.models)
+        cap = self.max_fallbacks + 1          # primary + N 次降级
+        tried = 0
+        for model in candidates:
+            tried += 1
+            try:
+                _log(f"TRY_STREAM model={model}")
+                t0 = time.time()
+                llm = self._build(model)
+                for chunk in llm.stream(messages):
+                    yield ChatGenerationChunk(message=chunk)
+                _log(f"OK_STREAM model={model} lat={int((time.time() - t0) * 1000)}ms")
+                return
+            except Exception as e:
+                if _is_quota_exhausted(e):
+                    _EXHAUSTED.add(model)
+                    _save_exhausted(_EXHAUSTED)
+                    _log(f"QUOTA_EXHAUSTED model={model} -> 已标记熔断并持久化。reason={_safe(e)}")
+                    logger.error("QUOTA_EXHAUSTED 模型免费额度耗尽已熔断",
+                                 extra={"event": "quota_exhausted", "model": model,
+                                        "tier": self.tier, "reason": _safe(e)})
+                else:
+                    _log(f"TRANSIENT_FAIL_STREAM model={model} err={_safe(e)}")
+                    logger.warning("TRANSIENT_FAIL_STREAM 流式模型瞬时失败触发降级",
+                                   extra={"event": "model_fail", "model": model,
+                                          "tier": self.tier, "err": _safe(e)})
+                if tried >= cap:
+                    try:
+                        res = self._run_failover(messages, stop, run_manager, kwargs, async_mode=False)
+                        msg = res.generations[0].message if hasattr(res, "generations") else res
+                        yield ChatGenerationChunk(message=AIMessageChunk(content=msg.content))
+                    except Exception as le:
+                        logger.error("STREAM_FALLBACK_FAIL 流式兜底也失败",
+                                     extra={"event": "stream_fallback_fail", "tier": self.tier,
+                                            "err": _safe(le)})
+                    return
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        """异步流式降级：同 _stream，但使用 astream。"""
+        candidates = [m for m in self.models if m not in _EXHAUSTED] or list(self.models)
+        cap = self.max_fallbacks + 1
+        tried = 0
+        for model in candidates:
+            tried += 1
+            try:
+                _log(f"TRY_ASTREAM model={model}")
+                t0 = time.time()
+                llm = self._build(model)
+                async for chunk in llm.astream(messages):
+                    yield ChatGenerationChunk(message=chunk)
+                _log(f"OK_ASTREAM model={model} lat={int((time.time() - t0) * 1000)}ms")
+                return
+            except Exception as e:
+                if _is_quota_exhausted(e):
+                    _EXHAUSTED.add(model)
+                    _save_exhausted(_EXHAUSTED)
+                    _log(f"QUOTA_EXHAUSTED model={model} -> 已标记熔断并持久化。reason={_safe(e)}")
+                    logger.error("QUOTA_EXHAUSTED 模型免费额度耗尽已熔断",
+                                 extra={"event": "quota_exhausted", "model": model,
+                                        "tier": self.tier, "reason": _safe(e)})
+                else:
+                    _log(f"TRANSIENT_FAIL_ASTREAM model={model} err={_safe(e)}")
+                    logger.warning("TRANSIENT_FAIL_ASTREAM 流式模型瞬时失败触发降级",
+                                   extra={"event": "model_fail", "model": model,
+                                          "tier": self.tier, "err": _safe(e)})
+                if tried >= cap:
+                    try:
+                        res = await self._run_failover(messages, stop, run_manager, kwargs, async_mode=True)
+                        msg = res.generations[0].message if hasattr(res, "generations") else res
+                        yield ChatGenerationChunk(message=AIMessageChunk(content=msg.content))
+                    except Exception as le:
+                        logger.error("STREAM_FALLBACK_FAIL 流式兜底也失败",
+                                     extra={"event": "stream_fallback_fail", "tier": self.tier,
+                                            "err": _safe(le)})
+                    return

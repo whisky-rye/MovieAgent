@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import queue
 import re
 import threading
 import time
@@ -27,6 +28,7 @@ from retrieval.candidates import Candidate
 from api.cache import get_cache, cache_key
 from api.ratelimit import get_limiter, RateLimited
 from agent.memory import get_memory_store
+from agent.guardrail import check_guardrail
 from config.settings import settings
 
 setup_logging()  # 集中式结构化日志（JSON 行 + 滚动文件 + 专用 llm_calls.log）
@@ -44,7 +46,7 @@ async def log_http_requests(request: Request, call_next):
     request.state.request_id = rid
     uid = "-"
     query = None
-    if request.method == "POST" and request.url.path in ("/recommend", "/chat"):
+    if request.method == "POST" and request.url.path in ("/recommend", "/chat", "/recommend/stream"):
         try:
             body = await request.body()  # Starlette 会缓存，端点仍可读取
             data = json.loads(body)
@@ -104,8 +106,6 @@ def _run(query: str, user_id: str, request_id: str = "") -> dict:
     护栏（P5 补充）：在锁之前先做内容安全判定——命中敏感/越域直接返回，
     不进入 Agent、不消耗云端额度。放行才进入串行化调用。
     """
-    from agent.guardrail import check_guardrail
-
     if not request_id:
         request_id = uuid.uuid4().hex[:12]
 
@@ -136,13 +136,21 @@ def _run(query: str, user_id: str, request_id: str = "") -> dict:
             raise RateLimited(retry_after)
 
     with _RUN_LOCK:
-        result = _AGENT.invoke({"user_id": user_id, "query": query, "request_id": request_id})
+        result = _AGENT.invoke({
+            "user_id": user_id,
+            "query": query,
+            "request_id": request_id,
+            "steps": [],
+            "thinking": {},
+        })
     ranked = result.get("ranked", []) or []
     return {
         "answer": result.get("answer", ""),
         "intent": result.get("intent", ""),
         "items": [_candidate_to_dict(c) for c in ranked],
         "sources": result.get("sources", {}),
+        "steps": result.get("steps", []),
+        "thinking": result.get("thinking", {}),
         "guardrail": {"action": "allow", "category": "ok", "reason": ""},
     }
 
@@ -214,6 +222,8 @@ def recommend(req: RecommendReq, request: Request):
         "count": len(items),
         "items": items,
         "sources": state.get("sources", {}),
+        "steps": state.get("steps", []),
+        "thinking": state.get("thinking", {}),
         "elapsed_ms": int((time.time() - t0) * 1000),
         "cached": False,
         "cache_backend": cache.backend(),
@@ -255,6 +265,120 @@ async def chat(req: ChatReq, request: Request):
                 await asyncio.sleep(0.01)
 
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
+
+
+def _sse(event: str, data: dict) -> str:
+    """构造一条 SSE 事件（event: ...\\ndata: {...}\\n\\n）。"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/recommend/stream")
+async def recommend_stream(req: RecommendReq, request: Request):
+    """结构化流式推荐（SSE）：实时推送工具链步骤、大模型思考过程、答案 token，最后 done。
+
+    事件协议（前端接入约定）：
+      event: step     data: {order, node, kind, summary, detail, elapsed_ms, thinking?}
+      event: thinking data: {content}            # 大模型深度思考过程 delta（generate 步骤）
+      event: token    data: {content}            # 答案正文 token delta
+      event: done     data: {intent, answer, items, sources, steps, thinking, elapsed_ms, request_id}
+      event: error    data: {message}            # 护栏拦截 / 限流 / 运行异常
+
+    与 /recommend 共用 Agent 与护栏/限流；缓存未启用（实时链路追踪）。并发仍走 _RUN_LOCK 单飞。
+    """
+    request_id = request.state.request_id
+    t0 = time.time()
+
+    # 护栏（锁前、不进 Agent）
+    g = check_guardrail(req.query)
+    if g.action != "allow":
+        logger_api.warning("guardrail 拦截（stream）",
+                           extra={"event": "guardrail", "action": g.action,
+                                  "category": g.category, "user_id": req.user_id,
+                                  "request_id": request_id, "query": req.query})
+
+        async def _block():
+            yield _sse("error", {"action": g.action, "category": g.category,
+                                 "message": g.message})
+        return StreamingResponse(_block(), media_type="text/event-stream")
+
+    # 限流（锁前、仅真实 LLM 才扣令牌）
+    if settings.RATELIMIT_ENABLED:
+        ok, retry_after = get_limiter().consume(req.user_id)
+        if not ok:
+            logger_api.warning("rate_limited 限流触发（stream）",
+                               extra={"event": "rate_limited", "user_id": req.user_id,
+                                      "request_id": request_id, "retry_after": retry_after})
+
+            async def _limited():
+                yield _sse("error", {"action": "rate_limited",
+                                     "message": f"请求过于频繁，请 {max(1, int(retry_after))} 秒后再试。"})
+            return StreamingResponse(_limited(), media_type="text/event-stream")
+
+    ev_q: "queue.Queue" = queue.Queue()
+    init_state = {
+        "user_id": req.user_id,
+        "query": req.query,
+        "request_id": request_id,
+        "steps": [],
+        "thinking": {},
+        # 流式钩子：把步骤 / 思考 / token 增量实时推入事件队列（统一包装为 (type, data)）
+        "_step_sink": lambda s: ev_q.put(("step", s)),
+        "_token_sink": lambda t: ev_q.put(("token", t)),
+        "_thinking_sink": lambda t: ev_q.put(("thinking", t)),
+    }
+    final: dict = {}
+
+    def _run_agent():
+        nonlocal final
+        with _RUN_LOCK:
+            try:
+                final = _AGENT.invoke(init_state)
+            except Exception as e:  # noqa: BLE001
+                logger_api.exception("recommend/stream 运行异常",
+                                     extra={"event": "api_error", "user_id": req.user_id,
+                                            "request_id": request_id, "query": req.query})
+                ev_q.put(("error", str(e)))
+
+    th = threading.Thread(target=_run_agent, daemon=True)
+    th.start()
+
+    async def _gen():
+        loop = asyncio.get_event_loop()
+        while True:
+            # 轮询事件队列（0.15s 超时），线程结束且队列空则收尾
+            try:
+                item = await loop.run_in_executor(None, lambda: ev_q.get(timeout=0.15))
+            except queue.Empty:
+                if not th.is_alive():
+                    break
+                continue
+            if item is None:
+                break
+            etype, data = item
+            if etype == "step":
+                yield _sse("step", data)
+            elif etype == "token":
+                yield _sse("token", {"content": data})
+            elif etype == "thinking":
+                yield _sse("thinking", {"content": data})
+            elif etype == "error":
+                yield _sse("error", {"message": data})
+                return
+        th.join()
+        ranked = final.get("ranked", []) or []
+        items = [_candidate_to_dict(c) for c in ranked][: req.top_k]
+        yield _sse("done", {
+            "request_id": request_id,
+            "intent": final.get("intent", ""),
+            "answer": final.get("answer", ""),
+            "items": items,
+            "sources": final.get("sources", {}),
+            "steps": final.get("steps", []),
+            "thinking": final.get("thinking", {}),
+            "elapsed_ms": int((time.time() - t0) * 1000),
+        })
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":
