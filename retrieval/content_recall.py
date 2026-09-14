@@ -1,7 +1,7 @@
-"""内容相似召回：把查询文本（或某作品）嵌入后，对 Chroma 做向量检索。"""
+"""内容相似召回：把查询文本（或某作品）嵌入后，对向量库（Chroma/Qdrant/Milvus，按 VECTOR_BACKEND 切换）做向量检索。"""
 from typing import Optional
 from vector.backend import get_vector_backend
-from vector.embed_client import OllamaEmbedClient
+from vector.embed_client import get_embed_client
 from retrieval.candidates import Candidate
 
 
@@ -26,7 +26,7 @@ def content_recall(
         raise ValueError("content_recall 需要 query 或 item_id 之一")
 
     backend = get_vector_backend()
-    emb = OllamaEmbedClient()
+    emb = get_embed_client()
 
     where: dict = {}
     if country:

@@ -18,6 +18,20 @@ class Settings(BaseSettings):
     # ---- 本地 Ollama（已就绪，仅核对） ----
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"  # Ollama 默认端口（实测含 bge-m3/qwen3.5/deepseek）
     EMBED_MODEL: str = "bge-m3:567m"   # 本地已装镜像（非默认 bge-m3）
+
+    # ---- 嵌入 Provider 开关（本地 Ollama bge-m3 | 云端 阿里百炼 qwen 嵌入） ----
+    # ollama：本地 bge-m3，零成本、零联网、最稳；开发期默认。
+    # cloud ：阿里百炼 compatible-mode /v1/embeddings（qwen3.7-text-embedding 等），
+    #         需联网+额度，中文语义/维度可调，适合对齐线上检索分布。
+    EMBED_PROVIDER: str = "cloud"     # ollama | cloud
+    # 向量维度（建库/召回必须一致）。本地 bge-m3=1024；云端 qwen 嵌入默认 1024 亦可配 512/768/1536。
+    EMBED_DIM: int = 1024
+    # 云端嵌入接入（阿里百炼）：默认复用 CLOUD_LLM_BASE_URL 同一 compatible-mode 网关与 API Key
+    CLOUD_EMBED_BASE_URL: str = ""     # 留空则复用 CLOUD_LLM_BASE_URL（阿里百炼 compatible-mode）
+    CLOUD_EMBED_API_KEY: str = ""      # 留空则复用 CLOUD_LLM_API_KEY
+    CLOUD_EMBED_MODEL: str = "qwen3.7-text-embedding"
+    # 是否向云端嵌入请求传 dimensions（qwen 嵌入支持动态维度；部分供应商不支持则关）
+    CLOUD_EMBED_USE_DIMENSIONS: bool = True
     LLM_STRONG: str = "deepseek-r1:7b"  # 本地已装：统一用 DeepSeek（STRONG/LIGHT 一致，用户要求）
     LLM_LIGHT: str = "deepseek-r1:7b"  # 本地已装：意图路由/重排（较小）
 
@@ -51,10 +65,14 @@ class Settings(BaseSettings):
         "qwen3.8-flash,deepseek-v4-flash-0731,glm-5.2"
     )
 
-    # ---- 向量库（开发期纯本地） ----
-    VECTOR_BACKEND: str = "chroma"   # chroma | qdrant
+    # ---- 向量库（开发期纯本地，支持多后端切换） ----
+    # chroma  ：开发期默认，进程内文件落盘，无需服务。
+    # qdrant  ：本地嵌入式文件模式（qdrant-client 本地直装，无需起服务/Docker）。
+    # milvus  ：Milvus Lite 单文件嵌入式（milvus-lite + pymilvus），超大规模预留。
+    VECTOR_BACKEND: str = "chroma"   # chroma | qdrant | milvus
     CHROMA_PATH: str = "./data/chroma"
     QDRANT_PATH: str = "./data/qdrant"
+    MILVUS_PATH: str = "./data/milvus_lite.db"   # Milvus Lite 单文件
 
     # ---- 缓存 / 可观测 ----
     REDIS_URL: str = "redis://127.0.0.1:6379/0"

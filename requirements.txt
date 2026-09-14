@@ -15,3 +15,8 @@ langgraph>=0.2
 fastapi>=0.141
 uvicorn[standard]>=0.30
 redis>=5
+# 向量库多后端（开发期本地嵌入式，无 Docker）：Chroma 默认；Qdrant / Milvus Lite 可切换
+qdrant-client>=1.7
+pymilvus>=2.4
+milvus-lite>=2.4
+requests>=2.31

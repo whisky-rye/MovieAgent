@@ -44,3 +44,24 @@ class OllamaEmbedClient:
         """单条查询嵌入（线上实时召回用，模型常驻热延迟约 300ms）。"""
         r = self._post([text])
         return r["embeddings"][0]
+
+    @property
+    def dim(self) -> int:
+        """本地 bge-m3 默认 1024 维（与 EMBED_DIM 对齐）。"""
+        return settings.EMBED_DIM
+
+
+def get_embed_client():
+    """嵌入客户端工厂：按 settings.EMBED_PROVIDER 切换本地/云端。
+
+    - ollama（默认）：OllamaEmbedClient，本地 bge-m3，零成本零联网。
+    - cloud        ：CloudEmbedClient，阿里百炼 qwen 嵌入（需联网+额度）。
+
+    两客户端接口一致（embed / embed_query / model / dim），业务层（建库、召回）
+    统一经本工厂获取，切换 Provider 无需改业务代码。
+    """
+    if settings.EMBED_PROVIDER == "cloud":
+        # 延迟导入，避免未装 requests 时连 ollama 路径也报错
+        from vector.cloud_embed import CloudEmbedClient
+        return CloudEmbedClient()
+    return OllamaEmbedClient()
