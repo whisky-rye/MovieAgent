@@ -22,6 +22,7 @@ from agent.tools import RUNNERS
 from agent.memory import get_memory_store
 from retrieval import content_recall
 from ranker import rerank
+from config.settings import settings
 from llm.client import chat_light, strip_think
 from agent.rag import (generate_explanation, build_source_meta, source_one_liner,
                        _generate_rich, _extract_thinking)
@@ -179,7 +180,8 @@ def _execute(state: AgentState) -> AgentState:
     step = _new_step(state, "execute", "retrieval",
                      f"多路召回 {sum(recall_counts.values())} 条 → 重排 {len(ranked)} 条",
                      detail={"plan": list(recall.keys()), "recall_counts": recall_counts,
-                             "ranked_count": len(ranked)},
+                             "ranked_count": len(ranked),
+                             "fusion_strategy": settings.FUSION_STRATEGY},
                      elapsed_ms=elapsed)
     _append_step(state, step)
     return {"candidates": recall, "ranked": ranked, "steps": [step]}

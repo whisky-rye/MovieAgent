@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     RATELIMIT_RATE: float = 0.2      # 令牌补充速率（个/秒）= 每 5 秒允许 1 次真实 LLM 调用
     RATELIMIT_BURST: int = 3         # 桶容量（突发上限）= 允许瞬时最多 3 次真实调用
 
+    # ---- 召回融合策略（v2.14：RRF 开关） ----
+    # 'rrf'  ：基于排名位次的融合（默认），免疫各路分数量级差异，新增召回路零成本接入
+    # 'score'：原 min-max 归一化加权融合，向后兼容回退用
+    FUSION_STRATEGY: str = "rrf"
+    # RRF 常数 K（名次惩罚项）：越大则高排名优势相对越弱、各路越平等；常用 60
+    RRF_K: int = 60
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

@@ -21,6 +21,16 @@ def _as_dict(c: Candidate) -> dict:
              "rating", "rating_count", "doc", "recall_source")}
 
 
+def _quality_pref(c: Candidate, user_genres: list[str] | None) -> tuple[float, float]:
+    """质量分(rating/10*0.2) 与 偏好分(与 user_genres 重叠，每条 +0.15 封顶 0.3)。"""
+    quality = (c.rating / 10.0) * 0.2 if c.rating else 0.0
+    pref = 0.0
+    if user_genres and c.genres:
+        overlap = len(set(user_genres) & set(c.genres))
+        pref = min(overlap * 0.15, 0.3)
+    return quality, pref
+
+
 def fuse(
     recall: dict[str, list[Candidate]],
     weights: dict | None = None,
@@ -44,11 +54,7 @@ def fuse(
         src_w = w.get(src, 1.0)
         for c in cands:
             base = src_w * norm[src].get(c.score, 0.5)
-            quality = (c.rating / 10.0) * 0.2 if c.rating else 0.0
-            pref = 0.0
-            if user_genres and c.genres:
-                overlap = len(set(user_genres) & set(c.genres))
-                pref = min(overlap * 0.15, 0.3)
+            quality, pref = _quality_pref(c, user_genres)
             total = base + quality + pref
             if c.id in merged:
                 merged[c.id].score = max(merged[c.id].score, total)
