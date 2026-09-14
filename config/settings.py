@@ -23,19 +23,33 @@ class Settings(BaseSettings):
 
     # ---- LLM Provider 开关（本地优先 / 云端可切换） ----
     LLM_PROVIDER: str = "ollama"   # ollama（本地优先） | cloud（OpenAI 兼容网关）
-    # ---- 云端 LLM（OpenAI 兼容：七牛/硅基流动/阿里百炼/火山方舟等） ----
+
+    # ---- 部署环境（决定云端彻底失败后的兜底行为） ----
+    # local（默认）：云端全部模型失败后，回退本地 Ollama（deepseek）兜底；
+    # production     ：云端全部失败直接返回报错，不做本地兜底。
+    APP_ENV: str = "local"         # local | production
+
+    # ---- 云端 LLM（OpenAI 兼容：阿里百炼/硅基流动/火山方舟等） ----
     CLOUD_LLM_BASE_URL: str = ""            # 兼容 base_url，例：https://api.siliconflow.cn/v1
     CLOUD_LLM_API_KEY: str = ""             # 供应商 API Key（仅本地 .env，不入仓）
-    CLOUD_LLM_STRONG_MODEL: str = "deepseek-chat"   # 云端强档模型名（被下方列表首模型覆盖时仅兜底）
-    CLOUD_LLM_LIGHT_MODEL: str = "deepseek-chat"    # 云端弱档模型名
     CLOUD_LLM_EXTRA_BODY: str = ""          # 供应商特有参数 JSON（可选），例：{"enable_thinking": false}
-    # ---- 云端模型顺序降级链（阿里云百炼提供，按此顺序尝试，前一个失败/熔断自动切下一个） ----
-    # 顺序即优先级；命中 403 AllocationQuota.FreeTierOnly（免费额度用完）的模型会被永久熔断，后续跳过
+    # ---- 云端模型强弱分档（各自独立按序降级；可在 .env 自由配置） ----
+    # 强档：解释/对话/工具调用（重质量）；前一个失败/熔断自动切下一个
+    CLOUD_LLM_STRONG_MODEL_LIST: str = (
+        "qwen3.8-27b,kimi-k3,qwen3.8-max-0902"
+    )
+    # 弱档：意图路由/重排（重速度）；前一个失败/熔断自动切下一个
+    CLOUD_LLM_LIGHT_MODEL_LIST: str = (
+        "qwen3.7-flash,qwen3.8-flash,deepseek-v4-flash-0731,glm-5.2"
+    )
+    CLOUD_LLM_MAX_FALLBACKS: int = 4        # 单档单次调用最多触发的降级次数（primary + 4 次 fallback）
+    # 云端全部失败后的本地兜底模型（仅 APP_ENV=local 生效）；留空则不做本地兜底
+    CLOUD_LLM_LOCAL_FALLBACK: str = "deepseek-r1:7b"
+    # 兼容旧字段：强弱两档都未配置时，回退到这个混合链（阿里云百炼 7 模型）
     CLOUD_LLM_MODEL_LIST: str = (
         "qwen3.8-27b,kimi-k3,qwen3.8-max-0902,qwen3.7-flash,"
         "qwen3.8-flash,deepseek-v4-flash-0731,glm-5.2"
     )
-    CLOUD_LLM_MAX_FALLBACKS: int = 4        # 单次调用最多触发的降级次数（primary + 4 次 fallback）
 
     # ---- 向量库（开发期纯本地） ----
     VECTOR_BACKEND: str = "chroma"   # chroma | qdrant
@@ -72,12 +86,30 @@ class Settings(BaseSettings):
         )
 
     @property
+    def cloud_strong_chain(self) -> List[str]:
+        """云端强档模型链（按序降级）。两档列表空时回退到旧混合链。"""
+        return self._split_chain(self.CLOUD_LLM_STRONG_MODEL_LIST) or self._split_chain(
+            self.CLOUD_LLM_MODEL_LIST
+        )
+
+    @property
+    def cloud_light_chain(self) -> List[str]:
+        """云端弱档模型链（按序降级）。两档列表空时回退到旧混合链。"""
+        return self._split_chain(self.CLOUD_LLM_LIGHT_MODEL_LIST) or self._split_chain(
+            self.CLOUD_LLM_MODEL_LIST
+        )
+
+    @property
     def cloud_model_chain(self) -> List[str]:
-        """云端模型有序降级链：优先用 CLOUD_LLM_MODEL_LIST，缺省回退到 STRONG/LIGHT。"""
-        raw = (self.CLOUD_LLM_MODEL_LIST or "").strip()
-        if raw:
-            return [m.strip() for m in raw.split(",") if m.strip()]
-        return [m for m in (self.CLOUD_LLM_STRONG_MODEL, self.CLOUD_LLM_LIGHT_MODEL) if m]
+        """兼容旧字段：返回强档链（优先）。"""
+        return self.cloud_strong_chain
+
+    @staticmethod
+    def _split_chain(raw: str) -> List[str]:
+        raw = (raw or "").strip()
+        if not raw:
+            return []
+        return [m.strip() for m in raw.split(",") if m.strip()]
 
 
 settings = Settings()

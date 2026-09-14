@@ -40,10 +40,11 @@ def chat_strong(**kwargs):
     """
     if _is_cloud():
         return FailoverChatModel(
-            models=settings.cloud_model_chain,
+            models=settings.cloud_strong_chain,
             max_fallbacks=settings.CLOUD_LLM_MAX_FALLBACKS,
             temperature=0.3,
             extra_body=_cloud_extra_body(),
+            local_fallback_model=settings.CLOUD_LLM_LOCAL_FALLBACK,
             **kwargs,
         )
     return ChatOllama(
@@ -63,10 +64,11 @@ def chat_light(**kwargs):
     """
     if _is_cloud():
         return FailoverChatModel(
-            models=settings.cloud_model_chain,
+            models=settings.cloud_light_chain,
             max_fallbacks=settings.CLOUD_LLM_MAX_FALLBACKS,
             temperature=0.1,
             extra_body=_cloud_extra_body(),
+            local_fallback_model=settings.CLOUD_LLM_LOCAL_FALLBACK,
             **kwargs,
         )
     return ChatOllama(

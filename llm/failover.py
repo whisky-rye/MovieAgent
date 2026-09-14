@@ -1,13 +1,14 @@
 """云端模型顺序降级 + 免费额度熔断。
 
 设计目标（用户要求）：
-- 阿里云百炼提供了多种模型，按给定顺序 `settings.CLOUD_LLM_MODEL_LIST` 逐一尝试；
+- 阿里云百炼提供了多种模型，按给定顺序（强档/弱档各自独立的 `settings.CLOUD_LLM_*_MODEL_LIST`）逐一尝试；
 - 上一个模型请求失败 / 超时 / 中断等错误时，自动触发下一个模型，单次调用最多触发 4 次降级；
 - 命中阿里云「免费额度用完即停」(HTTP 403 + AllocationQuota.FreeTierOnly.) 时，
   永久标记该模型为「熔断」，写入 `log/exhausted_models.json`，后续调用直接跳过，
   避免产生免费额度以外的费用；
 - 其它错误（超时 / 网络中断 / 服务不可用）视为瞬时失败，触发下一个模型；
-- 全部尝试均失败则抛出最后一个错误，由上层兜底。
+- 本档全部尝试均失败后：若 `APP_ENV=local` 且配置了 `local_fallback_model`，
+  回退本地 Ollama（deepseek）兜底；若 `APP_ENV=production` 则直接抛出云端最后一个错误。
 
 运行期日志（自动追加，不入仓）：
 - `log/model_failover.log`   人类可读的逐次尝试 / 熔断 / 放弃记录
@@ -110,6 +111,10 @@ class FailoverChatModel(BaseChatModel):
 
     业务层照常调用 `.invoke([messages])` / `.invoke("字符串")`，由本类在内部
     按 `models` 顺序逐个尝试，遇到失败/熔断自动切换，最多触发 `max_fallbacks` 次降级。
+
+    本地兜底：本档全部云端模型失败后，若 `local_fallback_model` 非空且 `settings.APP_ENV
+    =='local'`，自动回退本地 Ollama（deepseek）生成；生产环境（`APP_ENV='production'`）
+    不做本地兜底，直接抛出云端最后一个错误。
     """
 
     models: List[str]
@@ -117,6 +122,7 @@ class FailoverChatModel(BaseChatModel):
     temperature: float = 0.3
     extra_body: Dict[str, Any] = {}
     request_timeout: int = 180
+    local_fallback_model: str = ""  # 本地兜底模型（Ollama）；空 = 不做本地兜底
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -167,7 +173,30 @@ class FailoverChatModel(BaseChatModel):
                 if tried >= cap:
                     _log(f"MAX_FALLBACKS_EXCEEDED 已触发 {tried - 1} 次降级，放弃")
                     break
-        raise last_err or RuntimeError("FailoverChatModel: 无可用模型（全部熔断或失败）")
+        # 云端本档全部失败：按环境决定是否回退本地 Ollama
+        if self.local_fallback_model and settings.APP_ENV.lower() == "local":
+            try:
+                _log(f"LOCAL_FALLBACK 云端全失败，回退本地 Ollama model={self.local_fallback_model}")
+                return self._try_local(messages, stop, run_manager, kwargs, async_mode)
+            except Exception as le:
+                _log(f"LOCAL_FALLBACK_FAIL model={self.local_fallback_model} err={_safe(le)}")
+                last_err = le  # 本地兜底也失败：以本地错误向上抛（云端错误已记录）
+        raise last_err or RuntimeError("FailoverChatModel: 无可用模型（云端与本地兜底均失败）")
+
+    def _try_local(self, messages, stop, run_manager, kwargs, async_mode: bool):
+        """本地 Ollama 兜底：仅本地环境、云端全失败后被调用。think=False 提速且输出干净。"""
+        from langchain_ollama import ChatOllama
+
+        llm = ChatOllama(
+            model=self.local_fallback_model,
+            base_url=settings.OLLAMA_BASE_URL,
+            temperature=self.temperature,
+            think=False,
+            request_timeout=180,
+        )
+        if async_mode:
+            return llm._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        return llm._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         return self._run_failover(messages, stop, run_manager, kwargs, async_mode=False)

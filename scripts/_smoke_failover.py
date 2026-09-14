@@ -10,17 +10,22 @@ from llm.failover import (
 )
 
 print("PROVIDER =", settings.LLM_PROVIDER)
-print("MODEL_CHAIN =", settings.cloud_model_chain)
+print("APP_ENV =", settings.APP_ENV)
+print("STRONG_CHAIN =", settings.cloud_strong_chain)
+print("LIGHT_CHAIN  =", settings.cloud_light_chain)
+print("LOCAL_FALLBACK =", settings.CLOUD_LLM_LOCAL_FALLBACK)
 print("MAX_FALLBACKS =", settings.CLOUD_LLM_MAX_FALLBACKS)
 
-# 1) 构造：云端模式应返回 FailoverChatModel
+# 1) 构造：云端模式应返回 FailoverChatModel，且强/弱档各自取对应链
 s = chat_strong()
 l = chat_light()
 print("strong type =", type(s).__name__)
 print("light  type =", type(l).__name__)
 assert isinstance(s, FailoverChatModel)
 assert isinstance(l, FailoverChatModel)
-assert s.models == settings.cloud_model_chain
+assert s.models == settings.cloud_strong_chain
+assert l.models == settings.cloud_light_chain
+assert s.local_fallback_model == settings.CLOUD_LLM_LOCAL_FALLBACK
 
 # 2) 额度判定：伪造 403 AllocationQuota.FreeTierOnly
 class FakeErr(Exception):

@@ -15,7 +15,7 @@ api/        → agent/ → retrieval/ + ranker/ → vector/ + graph/ → etl/ + 
 - `agent/`：LangGraph 状态图（意图 → 规划 → 召回 → 反思兜底 → 生成）
 - `retrieval/` + `ranker/`：多路召回 + MMR 重排
 - `vector/`：Chroma（开发期）；`graph/`：知识图谱占位
-- `llm/`：`LLM_PROVIDER=ollama|cloud` 开关；云端走 OpenAI 兼容 + 顺序降级 + 免费额度熔断
+- `llm/`：`LLM_PROVIDER=ollama|cloud` 开关；云端走 OpenAI 兼容 + **强弱分档**（`CLOUD_LLM_STRONG/LIGHT_MODEL_LIST`，各自独立按序降级）+ 免费额度熔断 + **本地兜底**（`APP_ENV=local` 时云端全失败回退 Ollama deepseek）
 
 ---
 
@@ -165,10 +165,15 @@ RATELIMIT_BURST=3        # 桶容量（突发上限）= 允许瞬时最多 3 次
 ## 9. 配置（`.env` 关键项）
 ```
 LLM_PROVIDER=ollama|cloud          # 默认 ollama 本地优先
+APP_ENV=local                      # local=云端全失败回退本地Ollama(deepseek)；production=直接报错
 # 云端（阿里云百炼 OpenAI 兼容）
 CLOUD_LLM_BASE_URL=https://.../compatible-mode/v1
 CLOUD_LLM_API_KEY=sk-...
-CLOUD_LLM_MODEL_LIST=qwen3.8-27b,kimi-k3,...   # 顺序降级，最多 4 次
+# 云端模型强弱分档（各自独立按序降级，最多 4 次；可在 .env 自由配置）
+CLOUD_LLM_STRONG_MODEL_LIST=qwen3.8-27b,kimi-k3,qwen3.8-max-0902   # 强档：解释/对话/工具调用
+CLOUD_LLM_LIGHT_MODEL_LIST=qwen3.7-flash,qwen3.8-flash,deepseek-v4-flash-0731,glm-5.2  # 弱档：意图/重排
+CLOUD_LLM_LOCAL_FALLBACK=deepseek-r1:7b  # 云端全失败后的本地兜底模型（仅 APP_ENV=local 生效；留空不兜底）
+CLOUD_LLM_MODEL_LIST=qwen3.8-27b,...     # 兼容旧字段：两档都未配置时回退用
 CLOUD_LLM_RESET_QUOTA=1            # 启动清空免费额度熔断
 # Redis
 REDIS_HOST=127.0.0.1
