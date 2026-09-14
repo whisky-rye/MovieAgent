@@ -22,4 +22,5 @@ class AgentState(TypedDict, total=False):
     candidates: dict[str, list[Candidate]]   # 各召回来源 -> 候选
     ranked: list[Candidate]         # 融合+重排后的最终候选
     answer: str                     # 生成的解释性答案
+    sources: dict                    # 来源元信息（build_source_meta 产出；含对话一句话 + API 详细分源）
     error: str                      # 出错信息（用于优雅降级）

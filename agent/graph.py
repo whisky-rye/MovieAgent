@@ -15,7 +15,7 @@ from agent.memory import get_memory_store
 from retrieval import content_recall
 from ranker import rerank
 from llm.client import chat_light, strip_think
-from agent.rag import generate_explanation
+from agent.rag import generate_explanation, build_source_meta, source_one_liner
 
 
 def _extract_json(text: str) -> dict | None:
@@ -146,14 +146,20 @@ def _generate(state: AgentState) -> AgentState:
             import re
             genres = re.findall(r"[\u4e00-\u9fa5]{2,3}", slots.get("query", ""))
         get_memory_store().add_pref(uid, genres=genres or None)
-        return {"answer": f"已记下你的偏好（{genres or '未提取到具体类型'}），下次推荐会优先考虑。"}
+        return {"answer": f"已记下你的偏好（{genres or '未提取到具体类型'}），下次推荐会优先考虑。",
+                "sources": {}}
     if state.get("error"):
-        return {"answer": f"抱歉，检索出了点问题：{state['error']}。可换个说法再试。"}
+        return {"answer": f"抱歉，检索出了点问题：{state['error']}。可换个说法再试。",
+                "sources": {}}
     ranked = state.get("ranked", [])
     prefs = get_memory_store().get_prefs(uid)
     answer = generate_explanation(state.get("query", ""), ranked, prefs, uid,
                                   request_id=state.get("request_id", ""))
-    return {"answer": answer}
+    # 来源标记：对话末尾追加一句话来源概况；详细分源结构走 API sources 字段
+    meta = build_source_meta(ranked)
+    if meta.get("blocks"):
+        answer = answer + source_one_liner(meta)
+    return {"answer": answer, "sources": meta}
 
 
 def build_agent():

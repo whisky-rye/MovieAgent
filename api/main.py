@@ -82,9 +82,11 @@ _RUN_LOCK = threading.Lock()
 
 def _candidate_to_dict(c: Candidate) -> dict:
     """候选 -> 可序列化 dict（过滤内部字段）。"""
+    from agent.rag import _source_label
     return {
         "id": c.id,
         "source": c.source,
+        "source_label": _source_label(c.source),   # 明显来源标记（豆瓣 / IMDb）
         "title": c.title,
         "year": c.year,
         "genres": c.genres,
@@ -140,6 +142,7 @@ def _run(query: str, user_id: str, request_id: str = "") -> dict:
         "answer": result.get("answer", ""),
         "intent": result.get("intent", ""),
         "items": [_candidate_to_dict(c) for c in ranked],
+        "sources": result.get("sources", {}),
         "guardrail": {"action": "allow", "category": "ok", "reason": ""},
     }
 
@@ -210,6 +213,7 @@ def recommend(req: RecommendReq, request: Request):
         "answer": state["answer"],
         "count": len(items),
         "items": items,
+        "sources": state.get("sources", {}),
         "elapsed_ms": int((time.time() - t0) * 1000),
         "cached": False,
         "cache_backend": cache.backend(),

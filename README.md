@@ -66,11 +66,28 @@ python -m etl.build_chroma
 ```json
 {
   "query":"推荐一部太空科幻片","user_id":"demo","intent":"recommend",
-  "answer":"…解说文案…","count":5,"items":[{ "id":…, "title":…, "year":…,
-  "genres":[…],"rating":8.7,"recall_source":"search_by_text","score":0.91 }],
+  "answer":"…解说文案…\n\n〔信息来源〕豆瓣 Douban（17 部）、IMDb（3 部）（各来源作品信息已在返回结果的 sources 字段中分开展示）",
+  "count":5,
+  "items":[{ "id":"douban:123","source":"douban","source_label":"豆瓣 Douban",
+    "title":…, "year":…, "genres":[…],"rating":8.7,"recall_source":"search_by_text","score":0.91 }],
+  "sources":{
+    "summary":"豆瓣 Douban 17 部 · IMDb 3 部","has_both":true,
+    "blocks":[
+      {"source":"douban","label":"豆瓣 Douban","count":17,
+       "movies":[{"title":…,"year":…,"genres":[…],"country":"美国","rating":8.6,"rating_count":…,"intro":"…简介…"}]},
+      {"source":"imdb","label":"IMDb","count":3,
+       "movies":[{"title":"Spider-Man","year":2002,"genres":["Action","Sci-Fi"],"country":"United States","rating":0,"rating_count":0,"intro":"…"}]}
+    ]
+  },
   "elapsed_ms":54029,"cached":false,"cache_backend":"redis"
 }
 ```
+
+**来源透明化（来源标记）**：每个推荐结果都带信息来源（豆瓣 `douban` / IMDb `imdb`）。
+- **对话文案末尾一句话概括**：`answer` 末尾自动追加 `〔信息来源〕…` 一行（单来源如「豆瓣 Douban（17 部）」，双来源如「豆瓣 Douban（17 部）、IMDb（3 部）」并提示详见 `sources` 字段）。
+- **API 详细字段 `sources`**：按来源分块（`blocks`），每块带明显 `label` 标记（「豆瓣 Douban」/「IMDb」），块内 `movies` 列出该来源作品的基本信息（标题/年份/类型/国家）+ 评价（评分 `rating`/`rating_count`）+ 简介 `intro`。两个来源都出现时两块并列展示，一眼可区分。
+- 每个 `items` 元素额外带 `source_label`（「豆瓣 Douban」/「IMDb」），便于前端逐条标记来源。
+- 实现：`agent/rag.py` 的 `build_source_meta()` / `source_one_liner()`；`graph._generate` 写入 `state.sources` 并追加到 `answer`；`api/main.py` 的 `_run`/`recommend` 透传 `sources`、`_candidate_to_dict` 加 `source_label`。
 **测试命令**（任选其一）：
 ```bash
 # 最稳，跨 shell（已附 log/req.json）

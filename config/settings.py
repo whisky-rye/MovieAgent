@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     LANGSMITH_API_KEY: str = ""
 
     # ---- 偏好记忆后端（file / redis / fallback；fallback = Redis 优先 + file 兜底） ----
-    MEMORY_BACKEND: str = "fallback"    # fallback（默认）| redis | file
+    MEMORY_BACKEND: str = "file"    # fallback（默认）| redis | file
     MEMORY_FILE_ROOT: str = "data/memory"
 
     # ---- 日志（精细化可观测：JSON 行 + 滚动文件 + 专用云端 API 调用日志） ----
