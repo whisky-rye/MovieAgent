@@ -124,9 +124,21 @@ class Settings(BaseSettings):
     # 融合后是否做 MMR 多样性重排（避免清一色同类型）；默认开，等价原 strategy='mmr'
     RERANK_DIVERSIFY: bool = True
     # 可选 LLM pointwise 精排：对前 N 名做 LIGHT 相关性微调；0=关闭（默认，控成本）
-    RERANK_LLM_TOPN: int = 0
+    RERANK_LLM_TOPN: int = 30
     # MMR 多样性强度 λ：0=只看融合分，1=只看多样性；0.3 为常用值
     MMR_LAMBDA: float = 0.3
+    # ---- 精排实现开关（新接入点：阿里百炼重排序模型） ----
+    # 阶段二「精排」的实现选择：
+    #   local ：本地 LIGHT 模型 pointwise 精排（旧逻辑，默认，零成本零联网）
+    #   cloud ：阿里百炼 qwen3.7-text-rerank 重排序模型（新接入点，需联网+额度）
+    # 无论哪种，精排都只对前 RERANK_LLM_TOPN 名做（控成本）；RERANK_LLM_TOPN=0 则整段关闭。
+    RERANK_PROVIDER: str = "cloud"     # local | cloud
+    CLOUD_RERANK_MODEL: str = "qwen3.7-text-rerank"
+    # 重排端点与 LLM/嵌入不同路径（百炼走 /api/v1/services/rerank/...）。留空则按 CLOUD_LLM_BASE_URL 推导。
+    CLOUD_RERANK_BASE_URL: str = ""
+    CLOUD_RERANK_API_KEY: str = ""     # 留空则复用 CLOUD_LLM_API_KEY（同一供应商，同一 Key）
+    # 是否传 instruct（自定义排序任务指令）；默认 True（推荐场景：匹配用户偏好）
+    CLOUD_RERANK_USE_INSTRUCT: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
