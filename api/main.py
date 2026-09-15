@@ -19,7 +19,10 @@ import uuid
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+
+from api.routes.memory import router as memory_router  # G4：偏好记忆接口
 from pydantic import BaseModel, Field
 
 from config.logging_setup import setup_logging
@@ -37,6 +40,20 @@ _LS_ENABLED = setup_langsmith()  # P4.4：LangSmith 全链路追踪（按开关�
 logger_api = logging.getLogger("movie_agent.api")
 
 app = FastAPI(title="影片推荐智能体 API", version="0.1.0")
+
+# G2 CORS：允许前端 dev server（默认 http://localhost:5173）跨域访问本 API。
+# 开发期也可在 vite.config.ts 配 server.proxy 把 /api 代理到 :8000 实现零跨域；
+# 此处中间件同时服务「前端独立域名 / 生产」场景，并自动处理 /recommend/stream 的 OPTIONS 预检。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# G4 路由：偏好记忆对外接口（/memory/preferences 等）
+app.include_router(memory_router)
 
 
 @app.middleware("http")

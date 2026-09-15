@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from redis import Redis
+from sqlalchemy import create_engine, text
 
 from config.settings import settings
 
@@ -215,9 +216,105 @@ class FallbackMemoryStore(MemoryStore):
         return self._file.health()
 
 
+class MySQLMemoryStore(MemoryStore):
+    """偏好记忆的 MySQL 后端：落 `movie_agent.user_preferences` 表（与 imdb 语料库隔离）。
+
+    设计要点（与既有 FallbackMemoryStore「绝不阻塞主链路」原则一致）：
+    - 构造时尝试建库（CREATE DATABASE IF NOT EXISTS movie_agent）+ 建表；连不上则 use_mysql=False，
+      全程回退 FileMemoryStore，不抛异常、不阻塞主推荐链路。
+    - load/save 每次调用若 MySQL 抛异常，自动转 file 兜底。
+    - 单一 JSON 字段 data 存整份 {user_id, preferences, history}，与 FallbackMemoryStore 结构完全一致，
+      因此 Agent（graph.py / tools.py 的 remember_preference）与前端 /memory 接口共用同一张表 = 真正打通。
+    """
+
+    def __init__(
+        self,
+        file_root: str = "data/memory",
+        mysql_db: str = "movie_agent",
+    ):
+        self._file = FileMemoryStore(file_root)
+        self.use_mysql = False
+        self._engine = None
+        try:
+            # 1) 先连「无库名」实例建库（复用 IMDB_MYSQL_* 同实例同账号）
+            root_eng = create_engine(settings.MOVIE_AGENT_MYSQL_ROOT_DSN, pool_pre_ping=True)
+            with root_eng.connect() as c:
+                c.execute(
+                    text(
+                        f"CREATE DATABASE IF NOT EXISTS `{mysql_db}` "
+                        "DEFAULT CHARACTER SET utf8mb4"
+                    )
+                )
+                c.commit()
+            # 2) 连 movie_agent 库，建表
+            self._engine = create_engine(
+                settings.MOVIE_AGENT_MYSQL_DSN, pool_pre_ping=True, pool_recycle=3600
+            )
+            with self._engine.connect() as c:
+                c.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS user_preferences ("
+                        "  user_id VARCHAR(64) PRIMARY KEY,"
+                        "  data JSON NOT NULL,"
+                        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+                        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+                    )
+                )
+                c.commit()
+            self.use_mysql = True
+            logger.info("MySQLMemoryStore: 已启用 movie_agent.user_preferences 作为偏好记忆库")
+        except Exception as e:  # noqa: BLE001
+            self.use_mysql = False
+            self._engine = None
+            logger.warning("MySQLMemoryStore: 无法连接 movie_agent，回退 file 兜底：%s", e)
+
+    def load(self, uid: str) -> dict:
+        if self.use_mysql and self._engine is not None:
+            try:
+                with self._engine.connect() as c:
+                    row = c.execute(
+                        text("SELECT data FROM user_preferences WHERE user_id=:uid"),
+                        {"uid": uid},
+                    ).fetchone()
+                if row is not None:
+                    raw = row[0]
+                    return raw if isinstance(raw, dict) else json.loads(raw)
+                return {"user_id": uid, "preferences": {}, "history": []}
+            except Exception as e:  # noqa: BLE001
+                logger.warning("MySQLMemoryStore: load 失败，转 file：%s", e)
+        return self._file.load(uid)
+
+    def save(self, uid: str, data: dict) -> None:
+        if self.use_mysql and self._engine is not None:
+            try:
+                with self._engine.connect() as c:
+                    c.execute(
+                        text(
+                            "INSERT INTO user_preferences (user_id, data, updated_at) "
+                            "VALUES (:uid, :data, NOW()) "
+                            "ON DUPLICATE KEY UPDATE data=:data, updated_at=NOW()"
+                        ),
+                        {"uid": uid, "data": json.dumps(data, ensure_ascii=False)},
+                    )
+                    c.commit()
+                return
+            except Exception as e:  # noqa: BLE001
+                logger.warning("MySQLMemoryStore: save 失败，转 file：%s", e)
+        self._file.save(uid, data)
+
+    def backend(self) -> str:
+        return "mysql" if self.use_mysql else "mysql->file"
+
+
 def _make_store() -> MemoryStore:
     """按 settings.MEMORY_BACKEND 构建后端单例。"""
     backend = (settings.MEMORY_BACKEND or "fallback").strip().lower()
+    if backend == "mysql":
+        # 落 movie_agent.user_preferences 表；连不上自动回退 file（见 MySQLMemoryStore）
+        return MySQLMemoryStore(
+            file_root=settings.MEMORY_FILE_ROOT,
+            mysql_db=settings.MOVIE_AGENT_MYSQL_DB,
+        )
     if backend == "file":
         return FileMemoryStore(settings.MEMORY_FILE_ROOT)
     if backend == "redis":

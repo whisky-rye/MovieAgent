@@ -57,6 +57,7 @@ class VectorBackend(ABC):
 class ChromaBackend(VectorBackend):
     def __init__(self, path: str | None = None, collection: str = "movies"):
         self.path = path or settings.CHROMA_PATH
+        self.name = collection  # 集合名（字符串）；注意 self.collection 是 Collection 对象，二者不同
         self.client = chromadb.PersistentClient(path=self.path)
         self.collection = self.client.get_or_create_collection(
             name=collection, metadata={"hnsw:space": "cosine"}
@@ -66,6 +67,23 @@ class ChromaBackend(VectorBackend):
         self.collection.upsert(
             ids=ids, documents=docs, metadatas=metas, embeddings=vectors
         )
+
+    def reset_collection(self):
+        """清空并重建集合（Chroma 默认无 reset_collection，建库脚本 --reset 用）。"""
+        try:
+            self.client.delete_collection(self.name)
+        except Exception:
+            pass
+        self.collection = self.client.get_or_create_collection(
+            name=self.name, metadata={"hnsw:space": "cosine"}
+        )
+
+    def exists(self, ids: list[str]) -> set:
+        """返回已存在于集合中的 id 子集（供增量续建跳过已索引项）。"""
+        if not ids:
+            return set()
+        res = self.collection.get(ids=ids, include=[])
+        return set(res.get("ids") or [])
 
     def query(self, vector, top_k=10, where=None, genres=None):
         recall = max(top_k * 8, 32)  # 召回候选放大，供应用层 list 过滤后仍有足够 top_k
@@ -171,6 +189,24 @@ class QdrantBackend(VectorBackend):
             vectors_config=VectorParams(size=self.dim, distance=Distance.COSINE),
         )
 
+    def exists(self, ids: list[str]) -> set:
+        """返回已存在于集合中的 id 子集（供增量续建跳过已索引项）。"""
+        if not ids:
+            return set()
+        out = set()
+        for i in range(0, len(ids), 256):
+            batch = ids[i:i + 256]
+            pts = self.client.retrieve(
+                self.collection,
+                ids=[_stable_uint64(x) for x in batch],
+                with_vectors=False,
+            )
+            for p in pts:
+                pid = (p.payload or {}).get("_id")
+                if pid:
+                    out.add(pid)
+        return out
+
 
 class MilvusBackend(VectorBackend):
     """Milvus Lite 单文件嵌入式（milvus-lite + pymilvus，无需起服务/Docker）。
@@ -273,6 +309,20 @@ class MilvusBackend(VectorBackend):
         self.client.create_collection(
             self.collection, schema=schema, metric_type="COSINE"
         )
+
+    def exists(self, ids: list[str]) -> set:
+        """返回已存在于集合中的 id 子集（供增量续建跳过已索引项）。"""
+        if not ids:
+            return set()
+        out = set()
+        for i in range(0, len(ids), 256):
+            batch = ids[i:i + 256]
+            res = self.client.get(self.collection, ids=batch, with_vector=False)
+            for e in res or []:
+                pk = (e or {}).get("pk")
+                if pk:
+                    out.add(pk)
+        return out
 
 
 def get_vector_backend() -> VectorBackend:

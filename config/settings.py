@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     IMDB_MYSQL_ADDR: str = "127.0.0.1:3306"
     IMDB_MYSQL_DB: str = "imdb"
 
+    # ---- 新业务库 movie_agent（user / session / preference 等新增表统一落这里，与 imdb 语料库隔离）----
+    # host / 账号 / 密码 直接复用上方 IMDB_MYSQL_*（同一 MySQL 实例，仅库名不同）
+    MOVIE_AGENT_MYSQL_DB: str = "movie_agent"
+
+    # ---- 前端跨域（G2）：允许的前端源，逗号分隔 ----
+    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+
     # ---- 本地 Ollama（已就绪，仅核对） ----
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"  # Ollama 默认端口（实测含 bge-m3/qwen3.5/deepseek）
     EMBED_MODEL: str = "bge-m3:567m"   # 本地已装镜像（非默认 bge-m3）
@@ -73,6 +80,12 @@ class Settings(BaseSettings):
     CHROMA_PATH: str = "./data/chroma"
     QDRANT_PATH: str = "./data/qdrant"
     MILVUS_PATH: str = "./data/milvus_lite.db"   # Milvus Lite 单文件
+
+    # ---- 建库/导入（P 导入脚本分批分页用） ----
+    # 每批从 MySQL 主表拉取的行数（LIMIT/OFFSET 分页），避免全量 SELECT 一次拉爆内存。
+    BUILD_PAGE_SIZE: int = 5000
+    # 云端嵌入并发线程数（cloud 网络 IO 密集，建议 4~8；本地 Ollama 单线程即可，设 1）。
+    EMBED_CONCURRENCY: int = 1
 
     # ---- 缓存 / 可观测 ----
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
@@ -148,6 +161,22 @@ class Settings(BaseSettings):
         return (
             f"mysql+aiomysql://{self.IMDB_MYSQL_USER}:{self.IMDB_MYSQL_PASS}"
             f"@{self.IMDB_MYSQL_ADDR}/{self.IMDB_MYSQL_DB}?charset=utf8mb4"
+        )
+
+    @property
+    def MOVIE_AGENT_MYSQL_DSN(self) -> str:
+        """同步 MySQL DSN，指向 movie_agent 业务库（pymysql 驱动，utf8mb4）。"""
+        return (
+            f"mysql+pymysql://{self.IMDB_MYSQL_USER}:{self.IMDB_MYSQL_PASS}"
+            f"@{self.IMDB_MYSQL_ADDR}/{self.MOVIE_AGENT_MYSQL_DB}?charset=utf8mb4"
+        )
+
+    @property
+    def MOVIE_AGENT_MYSQL_ROOT_DSN(self) -> str:
+        """无库名 DSN，用于首次启动时 CREATE DATABASE（同一实例、同一账号）。"""
+        return (
+            f"mysql+pymysql://{self.IMDB_MYSQL_USER}:{self.IMDB_MYSQL_PASS}"
+            f"@{self.IMDB_MYSQL_ADDR}/?charset=utf8mb4"
         )
 
     @property
