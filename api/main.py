@@ -137,6 +137,8 @@ def _candidate_to_dict(c: Candidate) -> dict:
         "rating_count": c.rating_count,
         "recall_source": c.recall_source,
         "score": round(c.score, 4),
+        "douban_id": c.douban_id or "",
+        "imdb_id": c.imdb_id or "",
     }
 
 

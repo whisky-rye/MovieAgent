@@ -3,6 +3,7 @@ from typing import Optional
 from vector.backend import get_vector_backend
 from vector.embed_client import get_embed_client
 from retrieval.candidates import Candidate
+from db.session import fetch_all
 
 
 def content_recall(
@@ -49,12 +50,14 @@ def content_recall(
 
     rows = backend.query(vec, top_k=top_k, where=where or None, genres=genres)
     out: list[Candidate] = []
+    douban_pks: list[int] = []
     for rid, doc, meta, dist in rows:
         if item_id and rid == item_id:
             continue
-        out.append(Candidate(
+        source = meta.get("source", "")
+        c = Candidate(
             id=rid,
-            source=meta.get("source", ""),
+            source=source,
             title=meta.get("title", ""),
             year=meta.get("year", 0) or 0,
             genres=meta.get("genres_list", []) or [],
@@ -64,5 +67,26 @@ def content_recall(
             doc=doc or "",
             recall_source="content",
             score=1.0 - dist,
-        ))
+        )
+        # IMDb 的 id 即 imdb:{imdb_id}，可直接拆出；豆瓣需按主键回查 subject id
+        if source == "imdb" and rid.startswith("imdb:"):
+            c.imdb_id = rid.split(":", 1)[1]
+        elif source == "douban" and rid.startswith("douban:"):
+            douban_pks.append(int(rid.split(":", 1)[1]))
+        out.append(c)
+
+    # 向量元数据未存 douban_id，按主键批量回查补全（一次查询，顺带带出 imdb_id）
+    if douban_pks:
+        drows = fetch_all(
+            "SELECT id, douban_id, imdb_id FROM douban_main WHERE id IN :pks",
+            {"pks": douban_pks},
+        )
+        dm = {r["id"]: r for r in drows}
+        for c in out:
+            if c.source == "douban":
+                pk = int(c.id.split(":", 1)[1])
+                r = dm.get(pk)
+                if r:
+                    c.douban_id = str(r["douban_id"] or "")
+                    c.imdb_id = str(r["imdb_id"] or "")
     return out

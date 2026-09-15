@@ -74,6 +74,7 @@ def _relation_douban(item_id: str, top_k: int) -> list[Candidate]:
             rating_count=int(m["rating_count"] or 0),
             recall_source="relation",
             score=float(r["shared"]),
+            douban_id=str(m.get("douban_id") or ""),
         ))
     return out[:top_k]
 
@@ -124,5 +125,6 @@ def _relation_imdb(item_id: str, top_k: int) -> list[Candidate]:
             rating_count=int(m["rate_votes"] or 0),
             recall_source="relation",
             score=float(r["shared"]),
+            imdb_id=str(m.get("imdb_id") or ""),
         ))
     return out[:top_k]

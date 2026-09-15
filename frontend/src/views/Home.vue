@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { authUser, logout } from '../store/auth'
-import { currentView, setView } from '../store/ui'
+import { currentView, setView, sidebarOpen, toggleSidebar, closeSidebar } from '../store/ui'
 import Sidebar from './Sidebar.vue'
 import ChatView from './ChatView.vue'
 import MemoryView from './MemoryView.vue'
 </script>
 
 <template>
-  <div class="home">
+  <div class="home" :class="{ 'drawer-open': sidebarOpen }">
     <header class="topbar">
+      <button class="hamburger" aria-label="会话列表" @click="toggleSidebar">
+        <span></span><span></span><span></span>
+      </button>
       <span class="title">影片推荐智能体</span>
       <nav class="nav">
         <button :class="{ active: currentView === 'chat' }" @click="setView('chat')">对话</button>
@@ -21,6 +24,7 @@ import MemoryView from './MemoryView.vue'
     </header>
 
     <div class="body">
+      <div v-if="sidebarOpen" class="backdrop" @click="closeSidebar"></div>
       <Sidebar />
       <section class="main">
         <ChatView v-show="currentView === 'chat'" />
@@ -34,7 +38,7 @@ import MemoryView from './MemoryView.vue'
 .home { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .topbar {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 12px 20px; border-bottom: 1px solid var(--line); background: #fff; flex: none;
+  padding: 12px 20px; border-bottom: 1px solid var(--line); background: #fff; flex: none; gap: 10px;
 }
 .title { font-weight: 600; min-width: 120px; }
 .nav { display: flex; gap: 4px; background: var(--bg); padding: 3px; border-radius: 10px; }
@@ -42,6 +46,20 @@ import MemoryView from './MemoryView.vue'
 .nav button.active { background: #fff; color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
 .user { display: flex; align-items: center; gap: 12px; font-size: 14px; }
 .uname { color: var(--muted); }
-.body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.body { flex: 1; min-height: 0; display: flex; overflow: hidden; position: relative; }
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* 汉堡按钮：默认隐藏，移动端显示 */
+.hamburger { display: none; flex-direction: column; justify-content: center; gap: 4px; width: 36px; height: 36px; padding: 8px; background: none; }
+.hamburger span { display: block; height: 2px; background: var(--fg); border-radius: 2px; }
+
+@media (max-width: 720px) {
+  .hamburger { display: flex; }
+  .title { min-width: 0; font-size: 15px; }
+  .nav button { padding: 6px 12px; }
+  /* 侧边栏变抽屉：默认移出屏幕，drawer-open 时滑入；背景遮罩 */
+  .backdrop {
+    position: absolute; inset: 0; background: rgba(0, 0, 0, 0.32); z-index: 40;
+  }
+}
 </style>

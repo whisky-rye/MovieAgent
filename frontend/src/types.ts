@@ -12,6 +12,8 @@ export interface ChatItem {
   rating_count: number | null
   recall_source: string | null
   score: number
+  douban_id?: string // 豆瓣 subject id（用于跳转详情页，≠ 主键）
+  imdb_id?: string   // IMDb title id（形如 tt1234567）
 }
 
 export interface ChatStep {
@@ -34,7 +36,18 @@ export interface ChatMessage {
   intent?: string
   sources?: Record<string, unknown>
   streaming?: boolean // 流式接收中
-  error?: string
+  error?: string // 错误展示文案（兼容旧字段）
+  errorKind?: StreamError['kind'] // 错误类别，用于差异化展示/重试
+  retryAfter?: number // 限流建议等待秒数（rate_limited 时）
+}
+
+// 结构化错误（M6：429/护栏/断线在前端可见且优雅）
+export interface StreamError {
+  kind: 'rate_limited' | 'guardrail' | 'network' | 'stream' | 'server' | 'http' | 'unknown'
+  message: string
+  retry_after?: number // 建议等待秒数
+  action?: string // 后端 action（rate_limited / block / guide ...）
+  category?: string // 护栏 category（sensitive:* / offtopic ...）
 }
 
 export interface SessionSummary {

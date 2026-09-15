@@ -180,4 +180,12 @@ textarea:focus, input:focus { border-color: var(--accent); outline: none; }
 .error { background: #fef2f2; color: var(--danger); border: 1px solid #fecaca; padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
 .hint { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
 .hist { margin: 0; padding-left: 18px; color: var(--fg); font-size: 13px; line-height: 1.8; }
+
+@media (max-width: 720px) {
+  .memory { padding: 16px 14px; }
+  .layers { grid-template-columns: 1fr; }
+  .card { padding: 14px 16px; }
+  .actions { justify-content: stretch; }
+  .danger { width: 100%; }
+}
 </style>

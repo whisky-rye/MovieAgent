@@ -1,18 +1,27 @@
 <script setup lang="ts">
-import { ref, nextTick, onBeforeUnmount, watch } from 'vue'
+import { ref, nextTick, onBeforeUnmount, watch, computed } from 'vue'
 import MessageItem from './MessageItem.vue'
 import { streamRecommend } from '../api/stream'
 import {
-  currentSessionId, currentMessages, sessionsLoading, newSession, pushMessage, updateLastAssistant, selectSession,
+  currentSessionId, currentMessages, sessionsLoading, newSession, pushMessage,
+  updateLastAssistant, selectSession, truncateAfter,
 } from '../store/sessions'
-import type { ChatMessage, ChatStep, DonePayload } from '../types'
+import type { ChatMessage, ChatStep, DonePayload, StreamError } from '../types'
 
 const input = ref('')
 const streaming = ref(false)
+const connecting = ref(false)
 const scrollEl = ref<HTMLElement | null>(null)
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
 const nearBottom = ref(true)
 let controller: AbortController | null = null
+
+// M6：结构化错误 + 限流倒计时 + 断线重连
+const lastError = ref<StreamError | null>(null)
+const cooldown = ref(0)
+let cooldownTimer: number | null = null
+let autoRetryUsed = false
+let autoRetryTimer: number | null = null
 
 const prompts = [
   '推荐几部赛博朋克风格的科幻片',
@@ -20,6 +29,24 @@ const prompts = [
   '诺兰导演的烧脑电影',
   '近十年高分悬疑片',
 ]
+
+const busy = computed(() => connecting.value || streaming.value)
+
+// 底部告警条文案：限流倒计时内给出「Ns 后可重试」提示
+const alertText = computed(() => {
+  if (!lastError.value) return ''
+  if (lastError.value.kind === 'rate_limited' && cooldown.value > 0) {
+    return `${lastError.value.message}（${cooldown.value}s 后可重试）`
+  }
+  return lastError.value.message
+})
+const alertRetryLabel = computed(() =>
+  lastError.value && (lastError.value.kind === 'network' || lastError.value.kind === 'stream')
+    ? '重新连接'
+    : '重试',
+)
+// 护栏是策略性拦截，重试相同内容无意义，仅展示引导文案、不提供重试按钮
+const showRetry = computed(() => !!lastError.value && lastError.value.kind !== 'guardrail')
 
 function autoResize() {
   const el = textareaEl.value
@@ -55,29 +82,55 @@ async function ensureSession(): Promise<string> {
   return sid
 }
 
-async function send(customQuery?: string) {
-  const q = (customQuery ?? input.value).trim()
-  if (!q || streaming.value) return
+function clearCooldown() {
+  if (cooldownTimer !== null) {
+    clearInterval(cooldownTimer)
+    cooldownTimer = null
+  }
+  cooldown.value = 0
+}
 
-  const sid = await ensureSession()
+function startCooldown(sec?: number) {
+  clearCooldown()
+  if (!sec || sec <= 0) return
+  cooldown.value = Math.ceil(sec)
+  cooldownTimer = window.setInterval(() => {
+    cooldown.value -= 1
+    if (cooldown.value <= 0) clearCooldown()
+  }, 1000)
+}
 
-  // 立即插入用户消息 + 空的助手占位
-  pushMessage({ role: 'user', content: q })
+async function startStream(q: string, sid: string, pushUser: boolean) {
+  if (busy.value) return
+  const query = q.trim()
+  if (!query) return
+
+  if (pushUser) pushMessage({ role: 'user', content: query })
   pushMessage({ role: 'assistant', content: '', steps: [], streaming: true })
+
   input.value = ''
   if (textareaEl.value) textareaEl.value.style.height = 'auto'
   nearBottom.value = true
   await scrollToBottom(true)
 
+  lastError.value = null
+  clearCooldown()
   streaming.value = true
+  connecting.value = true
   controller = new AbortController()
 
   const steps: ChatStep[] = []
   try {
     await streamRecommend(
-      q,
+      query,
       sid,
       {
+        onConnecting: () => {
+          connecting.value = true
+        },
+        onFirstToken: () => {
+          connecting.value = false
+        },
         onStep: (s) => {
           steps.push(s)
           updateLastAssistant((m) => {
@@ -107,11 +160,27 @@ async function send(customQuery?: string) {
           })
           scrollToBottom(true)
         },
-        onError: (msg) => {
+        onError: (err: StreamError) => {
           updateLastAssistant((m) => {
-            m.error = msg
+            m.error = err.message
+            m.errorKind = err.kind
+            m.retryAfter = err.retry_after
             m.streaming = false
           })
+          lastError.value = err
+          if (err.kind === 'rate_limited') {
+            startCooldown(err.retry_after)
+          } else if (err.kind === 'network' || err.kind === 'stream') {
+            // 断线/流中断：1.5s 后自动重连一次（仅一次，避免风暴）
+            if (!autoRetryUsed) {
+              autoRetryUsed = true
+              autoRetryTimer = window.setTimeout(() => {
+                if (lastError.value && (lastError.value.kind === 'network' || lastError.value.kind === 'stream')) {
+                  doRetry()
+                }
+              }, 1500)
+            }
+          }
           scrollToBottom(true)
         },
       },
@@ -119,8 +188,66 @@ async function send(customQuery?: string) {
     )
   } finally {
     streaming.value = false
+    connecting.value = false
     controller = null
   }
+}
+
+async function send(customQuery?: string) {
+  if (busy.value) return
+  const q = (customQuery ?? input.value).trim()
+  if (!q) return
+  let sid: string
+  try {
+    sid = await ensureSession()
+  } catch (e) {
+    // 创建会话失败（多为断网）：同样走优雅告警，而非静默失败
+    surfaceError(e, '创建会话失败')
+    return
+  }
+  autoRetryUsed = false
+  await startStream(q, sid, true)
+}
+
+// 把任意异常转成顶层告警（M6：断网/创建会话失败可见且优雅）
+function surfaceError(e: unknown, ctx: string) {
+  streaming.value = false
+  connecting.value = false
+  const msg = e instanceof Error ? e.message : String(e)
+  const err: StreamError = { kind: 'network', message: `${ctx}：${msg}` }
+  lastError.value = err
+  updateLastAssistant((m) => {
+    m.error = err.message
+    m.errorKind = 'network'
+    m.streaming = false
+  })
+  startCooldown(0)
+  scrollToBottom(true)
+}
+
+// 重试：去掉上一次用户消息之后的失败占位，再重发（不重复推送用户气泡）
+function doRetry() {
+  if (autoRetryTimer !== null) {
+    clearTimeout(autoRetryTimer)
+    autoRetryTimer = null
+  }
+  const msgs = currentMessages.value
+  let ui = -1
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user') {
+      ui = i
+      break
+    }
+  }
+  if (ui < 0) return
+  truncateAfter(ui)
+  const sid = currentSessionId.value ?? ''
+  startStream(msgs[ui].content, sid, false)
+}
+
+function retryLast() {
+  autoRetryUsed = false
+  doRetry()
 }
 
 function stop() {
@@ -129,16 +256,7 @@ function stop() {
     m.streaming = false
   })
   streaming.value = false
-}
-
-function retryLast() {
-  const msgs = currentMessages.value
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role === 'user') {
-      send(msgs[i].content)
-      return
-    }
-  }
+  connecting.value = false
 }
 
 function onKey(e: KeyboardEvent) {
@@ -148,7 +266,11 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
-onBeforeUnmount(() => controller?.abort())
+onBeforeUnmount(() => {
+  controller?.abort()
+  clearCooldown()
+  if (autoRetryTimer !== null) clearTimeout(autoRetryTimer)
+})
 
 // 切换会话后自动滚到底
 watch(currentSessionId, () => {
@@ -169,14 +291,24 @@ watch(currentSessionId, () => {
         <h2>想看点什么？</h2>
         <p>描述你的观影心情、类型偏好或导演演员，AI 会推荐合适的影片。</p>
         <div class="chips">
-          <button v-for="p in prompts" :key="p" class="chip" @click="send(p)">{{ p }}</button>
+          <button v-for="p in prompts" :key="p" class="chip" :disabled="busy" @click="send(p)">{{ p }}</button>
         </div>
       </div>
     </div>
 
     <div v-show="!sessionsLoading && currentMessages.length > 0" ref="scrollEl" class="messages" @scroll="onScroll">
       <MessageItem v-for="(m, i) in currentMessages" :key="i" :message="m" />
-      <div v-if="streaming" class="typing">正在生成中…</div>
+      <div v-if="connecting && !streaming" class="typing">正在连接…</div>
+      <div v-else-if="streaming" class="typing">正在生成中…</div>
+    </div>
+
+    <!-- M6：断线 / 限流 / 护栏 优雅告警条 -->
+    <div v-if="lastError" class="alert" :class="lastError.kind">
+      <span class="alert-dot"></span>
+      <span class="alert-msg">{{ alertText }}</span>
+      <button v-if="showRetry" class="alert-retry" :disabled="cooldown > 0" @click="doRetry">
+        {{ cooldown > 0 ? `${cooldown}s` : alertRetryLabel }}
+      </button>
     </div>
 
     <div class="composer">
@@ -184,27 +316,19 @@ watch(currentSessionId, () => {
         ref="textareaEl"
         v-model="input"
         rows="1"
-        placeholder="描述你想看的电影，Enter 发送 / Shift+Enter 换行"
+        :placeholder="busy ? '正在生成，请稍候…' : '描述你想看的电影，Enter 发送 / Shift+Enter 换行'"
+        :disabled="busy"
         @keydown="onKey"
         @input="onInput"
       ></textarea>
-      <button v-if="!streaming" class="send" :disabled="!input.trim()" @click="send()">发送</button>
+      <button v-if="!streaming" class="send" :disabled="!input.trim() || connecting" @click="send()">发送</button>
       <button v-else class="stop" @click="stop">停止</button>
     </div>
-
-    <!-- 最后一条助手消息出错时，悬浮重试条 -->
-    <button
-      v-if="currentMessages.length && currentMessages[currentMessages.length - 1].role === 'assistant' && currentMessages[currentMessages.length - 1].error"
-      class="retry-bar"
-      @click="retryLast"
-    >
-      最后一条回复失败，点击重试
-    </button>
   </div>
 </template>
 
 <style scoped>
-.chat { flex: 1; min-height: 0; display: grid; grid-template-rows: 1fr auto; position: relative; }
+.chat { flex: 1; min-height: 0; display: grid; grid-template-rows: 1fr auto auto; position: relative; }
 .loading-state {
   grid-row: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
   color: var(--muted); overflow-y: auto;
@@ -224,13 +348,33 @@ watch(currentSessionId, () => {
   background: #fff; color: var(--fg); border: 1px solid var(--line);
   padding: 8px 12px; font-size: 13px; border-radius: 999px;
 }
-.chip:hover { border-color: var(--accent); color: var(--accent); }
+.chip:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.chip:disabled { opacity: 0.5; cursor: default; }
 
 .messages { grid-row: 1; min-height: 0; overflow-y: auto; padding: 20px 24px; }
 .typing { font-size: 13px; color: var(--muted); margin-top: 8px; }
 
+/* M6 告警条 */
+.alert {
+  grid-row: 2;
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 16px; padding: 8px 12px; border-radius: 10px;
+  font-size: 13px; background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412;
+}
+.alert.rate_limited { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
+.alert.guardrail { background: #f0f9ff; border-color: #bae6fd; color: #075985; }
+.alert.network, .alert.stream { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+.alert.unknown, .alert.http, .alert.server { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+.alert-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.alert-msg { flex: 1; min-width: 0; line-height: 1.5; }
+.alert-retry {
+  flex: none; background: currentColor; color: #fff; padding: 5px 12px; font-size: 12px;
+  border-radius: 8px; min-width: 56px;
+}
+.alert-retry:disabled { opacity: 0.55; cursor: default; }
+
 .composer {
-  grid-row: 2; display: flex; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--line); background: #fff;
+  grid-row: 3; display: flex; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--line); background: #fff;
   align-items: flex-end;
 }
 .composer textarea {
@@ -239,13 +383,16 @@ watch(currentSessionId, () => {
   min-height: 40px; overflow-y: auto;
 }
 .composer textarea:focus { border-color: var(--accent); outline: none; }
+.composer textarea:disabled { background: #f9fafb; }
 .send { background: var(--accent); color: #fff; padding: 0 18px; height: 40px; }
 .send:disabled { opacity: 0.5; cursor: default; }
 .stop { background: var(--danger); color: #fff; padding: 0 18px; height: 40px; }
 
-.retry-bar {
-  position: absolute; bottom: 76px; left: 50%; transform: translateX(-50%);
-  background: #fff; color: var(--danger); border: 1px solid var(--danger);
-  padding: 8px 14px; border-radius: 999px; font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+/* 移动端：输入框与告警更紧凑 */
+@media (max-width: 720px) {
+  .messages { padding: 16px 14px; }
+  .composer { padding: 10px 12px; }
+  .send, .stop { padding: 0 14px; }
+  .alert { margin: 0 10px; }
 }
 </style>

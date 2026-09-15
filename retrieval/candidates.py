@@ -16,6 +16,8 @@ class Candidate:
     doc: str = ""
     recall_source: str = ""     # content | relation | coldstart
     score: float = 0.0          # 召回/排序阶段综合分
+    douban_id: str = ""         # 豆瓣 subject id（用于拼 detail 链接，≠ 主键 id）
+    imdb_id: str = ""           # IMDb title id（形如 tt1234567，用于拼 detail 链接）
 
 
 def split_genres(s) -> list[str]:

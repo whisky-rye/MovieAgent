@@ -148,6 +148,7 @@ def _cand_dict(c: Candidate) -> dict:
         for k in (
             "id", "source", "title", "year", "genres", "country",
             "rating", "rating_count", "doc", "recall_source",
+            "douban_id", "imdb_id",  # 外链 id 需要跨精排保留
         )
     }
 

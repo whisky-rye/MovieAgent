@@ -3,16 +3,21 @@ import { ref, onMounted } from 'vue'
 import { vFocus } from '../focus'
 import {
   sessionList, currentSessionId, loadSessions, newSession, selectSession,
-  renameSession, deleteSession,
+  renameSession, deleteSession, sessionsListLoading, sessionsListError,
 } from '../store/sessions'
+import { sidebarOpen, closeSidebar } from '../store/ui'
 
 const renamingId = ref<string | null>(null)
 const renameValue = ref('')
+
+const listLoading = sessionsListLoading
+const listError = sessionsListError
 
 onMounted(loadSessions)
 
 async function onNew() {
   await newSession()
+  closeSidebar()
 }
 
 function startRename(id: string, title: string) {
@@ -33,6 +38,12 @@ async function onDelete(id: string, title: string) {
   }
 }
 
+// 移动端点选会话后收起抽屉
+function onSelect(id: string) {
+  selectSession(id)
+  closeSidebar()
+}
+
 function fmtDate(iso: string | null): string {
   if (!iso) return ''
   const d = new Date(iso)
@@ -42,10 +53,16 @@ function fmtDate(iso: string | null): string {
 </script>
 
 <template>
-  <aside class="sidebar">
+  <aside class="sidebar" :class="{ open: sidebarOpen }">
     <button class="new" @click="onNew">+ 新建对话</button>
 
-    <div v-if="sessionList.length === 0" class="empty">还没有会话，点击上方新建。</div>
+    <div v-if="listLoading" class="empty">
+      <span class="mini-spinner"></span> 加载中…
+    </div>
+    <div v-else-if="listError" class="empty error">
+      {{ listError }}。<button class="link retry" @click="loadSessions">重试</button>
+    </div>
+    <div v-else-if="sessionList.length === 0" class="empty">还没有会话，点击上方新建。</div>
 
     <ul class="list">
       <li
@@ -53,7 +70,7 @@ function fmtDate(iso: string | null): string {
         :key="s.session_id"
         class="item"
         :class="{ active: s.session_id === currentSessionId }"
-        @click="selectSession(s.session_id)"
+        @click="onSelect(s.session_id)"
       >
         <template v-if="renamingId === s.session_id">
           <input
@@ -86,6 +103,14 @@ function fmtDate(iso: string | null): string {
   margin: 12px; background: var(--accent); color: #fff; padding: 10px; font-weight: 600;
 }
 .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px; }
+.empty.error { color: var(--danger); }
+.empty .retry { padding: 0 2px; font-size: 13px; }
+.mini-spinner {
+  display: inline-block; width: 12px; height: 12px; vertical-align: -2px; margin-right: 4px;
+  border: 2px solid var(--line); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 .list { list-style: none; margin: 0; padding: 0 8px 12px; overflow-y: auto; flex: 1; }
 .item {
   padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent;
@@ -101,4 +126,16 @@ function fmtDate(iso: string | null): string {
 .mini { background: none; color: var(--muted); font-size: 12px; padding: 0; }
 .mini.danger { color: var(--danger); }
 .rename-input { width: 100%; font-size: 14px; padding: 4px 6px; }
+
+/* 移动端：侧边栏变抽屉，默认移出屏幕，open 时滑入 */
+@media (max-width: 720px) {
+  .sidebar {
+    position: absolute; top: 0; bottom: 0; left: 0; z-index: 50;
+    width: 80%; max-width: 300px;
+    transform: translateX(-100%); transition: transform 0.22s ease;
+    box-shadow: 2px 0 12px rgba(0, 0, 0, 0.12);
+  }
+  .sidebar.open { transform: none; }
+  .actions { visibility: visible; }
+}
 </style>

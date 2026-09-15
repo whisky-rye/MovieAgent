@@ -11,6 +11,8 @@ interface SessionState {
   messages: ChatMessage[]
   loading: boolean
   loaded: boolean
+  listLoading: boolean
+  listError: string | null
 }
 
 const state = reactive<SessionState>({
@@ -19,17 +21,21 @@ const state = reactive<SessionState>({
   messages: [],
   loading: false,
   loaded: false,
+  listLoading: false,
+  listError: null,
 })
 
 export const sessionList = computed(() => state.list)
 export const currentSessionId = computed(() => state.currentId)
 export const currentMessages = computed(() => state.messages)
 export const sessionsLoading = computed(() => state.loading)
+export const sessionsListLoading = computed(() => state.listLoading)
+export const sessionsListError = computed(() => state.listError)
 
 // 后端 thinking 可能是对象（{route, generate}，P2.13 思考可视化），
 // 而前端 ChatMessage.thinking 约定为字符串。在加载历史会话时归一化，
 // 否则 MessageItem 里 message.thinking.trim() 会因对象而抛错、整页渲染中断。
-function normalizeThinking(t: unknown): string | undefined {
+export function normalizeThinking(t: unknown): string | undefined {
   if (t == null) return undefined
   if (typeof t === 'string') return t
   if (typeof t === 'object') {
@@ -57,13 +63,17 @@ function mapMessages(msgs: unknown[]): ChatMessage[] {
 }
 
 export async function loadSessions(): Promise<void> {
+  state.listLoading = true
+  state.listError = null
   try {
     const list = await apiFetch<SessionSummary[]>('/sessions')
     state.list = list
   } catch {
     state.list = []
+    state.listError = '会话列表加载失败'
   } finally {
     state.loaded = true
+    state.listLoading = false
   }
 }
 
@@ -135,4 +145,11 @@ export function updateLastAssistant(updater: (m: ChatMessage) => void): void {
 
 export function clearCurrent(): void {
   state.messages = []
+}
+
+// 重试时裁掉「最后一条用户消息之后的所有内容」（即上一次失败的助手占位），
+// 避免历史里残留一条报错气泡。
+export function truncateAfter(index: number): void {
+  if (index < 0) return
+  state.messages.splice(index + 1)
 }

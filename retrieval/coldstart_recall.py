@@ -54,6 +54,8 @@ def coldstart_recall(
             rating_count=int(m["rating_count"] or 0),
             recall_source="coldstart",
             score=_quality_score(m["rating"], m["rating_count"]),
+            douban_id=str(m.get("douban_id") or ""),
+            imdb_id=str(m.get("imdb_id") or ""),
         ))
         if len(out) >= top_k:
             break

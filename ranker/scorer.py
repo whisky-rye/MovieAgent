@@ -18,7 +18,8 @@ def _minmax(vals: list[float]) -> dict[float, float]:
 def _as_dict(c: Candidate) -> dict:
     return {k: getattr(c, k) for k in
             ("id", "source", "title", "year", "genres", "country",
-             "rating", "rating_count", "doc", "recall_source")}
+             "rating", "rating_count", "doc", "recall_source",
+             "douban_id", "imdb_id")}  # 外链 id 需要跨融合保留
 
 
 def _quality_pref(c: Candidate, user_genres: list[str] | None) -> tuple[float, float]:

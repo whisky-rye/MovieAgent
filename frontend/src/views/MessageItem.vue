@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { renderMarkdown } from '../utils/md'
+import { doubanUrl, imdbUrl } from '../utils/extlinks'
 import type { ChatItem, ChatMessage, ChatStep } from '../types'
 
 defineProps<{ message: ChatMessage }>()
@@ -31,6 +32,14 @@ function kindLabel(kind: string | undefined): string {
     default:
       return kind || '步骤'
   }
+}
+
+// 外部详情页链接（仅当对应 id 存在时展示），逻辑见 utils/extlinks.ts
+function doubanUrlFor(it: ChatItem): string | null {
+  return doubanUrl(it.douban_id)
+}
+function imdbUrlFor(it: ChatItem): string | null {
+  return imdbUrl(it.imdb_id)
 }
 </script>
 
@@ -87,6 +96,10 @@ function kindLabel(kind: string | undefined): string {
               <span v-if="it.genres && it.genres.length" class="muted">{{ it.genres.join(' / ') }}</span>
             </div>
             <div v-if="it.recall_source" class="recall">召回：{{ it.recall_source }}</div>
+            <div class="links">
+              <a v-if="doubanUrlFor(it)" class="ext douban" :href="doubanUrlFor(it)" target="_blank" rel="noopener noreferrer">豆瓣详情 ↗</a>
+              <a v-if="imdbUrlFor(it)" class="ext imdb" :href="imdbUrlFor(it)" target="_blank" rel="noopener noreferrer">IMDb 详情 ↗</a>
+            </div>
           </div>
         </div>
       </template>
@@ -152,4 +165,14 @@ function kindLabel(kind: string | undefined): string {
 .rating { color: #d97706; font-weight: 600; }
 .muted { color: var(--muted); }
 .recall { margin-top: 4px; font-size: 11px; color: #9ca3af; }
+.links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ext {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 12px; text-decoration: none; line-height: 1;
+  padding: 4px 8px; border-radius: 6px; border: 1px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.ext:hover { filter: brightness(0.97); }
+.ext.douban { background: #fff1e6; color: #c0501a; border-color: #f6d3b8; }
+.ext.imdb { background: #eaf2ff; color: #1d4ed8; border-color: #c7dbff; }
 </style>

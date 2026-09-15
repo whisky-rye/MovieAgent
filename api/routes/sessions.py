@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from agent.session_store import get_session_store
 from api.deps import CurrentUser, get_current_user
+from api.items_backfill import backfill_item_ids
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -59,7 +60,12 @@ def _require_owner(session_id: str, user_id: str) -> dict:
 
 @router.get("/{session_id}")
 def get_session(session_id: str, auth: CurrentUser = Depends(get_current_user)):
-    return _require_owner(session_id, auth.user_id)
+    rec = _require_owner(session_id, auth.user_id)
+    # 历史消息里旧推荐卡片可能缺外部 id：按 item.id 回填，保证详情页外链可用
+    for msg in rec.get("messages") or []:
+        if isinstance(msg, dict) and msg.get("items"):
+            backfill_item_ids(msg["items"])
+    return rec
 
 
 @router.patch("/{session_id}")

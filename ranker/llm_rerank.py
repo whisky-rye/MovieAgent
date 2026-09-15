@@ -12,7 +12,8 @@ _PROMPT = (
 def _cand_dict(c: Candidate) -> dict:
     return {k: getattr(c, k) for k in
             ("id", "source", "title", "year", "genres", "country",
-             "rating", "rating_count", "doc", "recall_source")}
+             "rating", "rating_count", "doc", "recall_source",
+             "douban_id", "imdb_id")}  # 外链 id 需要跨精排保留
 
 
 def llm_rerank(
