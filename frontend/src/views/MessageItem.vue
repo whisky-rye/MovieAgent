@@ -1,8 +1,13 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { renderMarkdown } from '../utils/md'
 import type { ChatItem, ChatMessage, ChatStep } from '../types'
 
 defineProps<{ message: ChatMessage }>()
+
+function md(html: string): string {
+  return renderMarkdown(html)
+}
 
 const showSteps = ref(false)
 const showThinking = ref(false)
@@ -55,8 +60,8 @@ function kindLabel(kind: string | undefined): string {
           </ol>
         </div>
 
-        <!-- 深度思考 -->
-        <div v-if="message.thinking && message.thinking.trim()" class="block">
+        <!-- 深度思考（thinking 可能为对象，已在 store 层归一化为字符串；此处再加一道防卫） -->
+        <div v-if="typeof message.thinking === 'string' && message.thinking.trim()" class="block">
           <button class="toggle" @click="showThinking = !showThinking">
             {{ showThinking ? '收起' : '展开' }} 深度思考
           </button>
@@ -64,7 +69,7 @@ function kindLabel(kind: string | undefined): string {
         </div>
 
         <!-- 答案正文 -->
-        <p class="text" :class="{ streaming: message.streaming }">{{ message.content }}</p>
+        <div class="text" :class="{ streaming: message.streaming }" v-html="md(message.content)"></div>
         <span v-if="message.streaming" class="cursor">▍</span>
 
         <!-- 候选影片 -->
@@ -99,7 +104,18 @@ function kindLabel(kind: string | undefined): string {
 .msg.user .avatar { background: var(--accent); }
 .msg.assistant .avatar { background: #0f766e; }
 .bubble { flex: 1; min-width: 0; }
-.text { margin: 0; white-space: pre-wrap; line-height: 1.6; font-size: 14px; }
+.text { line-height: 1.7; font-size: 14px; }
+.text :deep(p) { margin: 0 0 10px; }
+.text :deep(p:last-child) { margin-bottom: 0; }
+.text :deep(ul), .text :deep(ol) { margin: 8px 0; padding-left: 20px; }
+.text :deep(li) { margin: 4px 0; }
+.text :deep(code) {
+  background: #f3f4f6; padding: 2px 5px; border-radius: 4px; font-size: 13px; color: #c7254e;
+}
+.text :deep(pre) {
+  background: #f8f9fa; padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;
+}
+.text :deep(pre code) { background: transparent; padding: 0; color: inherit; }
 .streaming::after { content: ''; }
 .cursor { color: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }

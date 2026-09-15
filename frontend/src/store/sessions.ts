@@ -26,6 +26,20 @@ export const currentSessionId = computed(() => state.currentId)
 export const currentMessages = computed(() => state.messages)
 export const sessionsLoading = computed(() => state.loading)
 
+// 后端 thinking 可能是对象（{route, generate}，P2.13 思考可视化），
+// 而前端 ChatMessage.thinking 约定为字符串。在加载历史会话时归一化，
+// 否则 MessageItem 里 message.thinking.trim() 会因对象而抛错、整页渲染中断。
+function normalizeThinking(t: unknown): string | undefined {
+  if (t == null) return undefined
+  if (typeof t === 'string') return t
+  if (typeof t === 'object') {
+    return Object.values(t as Record<string, unknown>)
+      .filter((v): v is string => typeof v === 'string' && v.length > 0)
+      .join('\n\n')
+  }
+  return String(t)
+}
+
 // 把后端 /sessions/{id} 返回的 messages 映射为前端 ChatMessage
 function mapMessages(msgs: unknown[]): ChatMessage[] {
   return (msgs ?? []).map((m) => {
@@ -35,7 +49,7 @@ function mapMessages(msgs: unknown[]): ChatMessage[] {
       content: (msg.content as string) ?? '',
       items: (msg.items as ChatMessage['items']) ?? undefined,
       steps: (msg.steps as ChatMessage['steps']) ?? undefined,
-      thinking: (msg.thinking as string) ?? undefined,
+      thinking: normalizeThinking(msg.thinking),
       intent: (msg.intent as string) ?? undefined,
       sources: (msg.sources as Record<string, unknown>) ?? undefined,
     }

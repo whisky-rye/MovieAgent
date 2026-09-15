@@ -25,6 +25,7 @@ class PrefPutReq(BaseModel):
     # 兼容旧契约保留该字段，但真实 user_id 一律取自鉴权依赖（auth.user_id），本字段被忽略
     user_id: str = Field(default="default", description="(已弃用) user_id 现由鉴权依赖注入")
     genres: Optional[List[str]] = Field(default=None, description="追加的偏好类型（去重合并）")
+    remove_genres: Optional[List[str]] = Field(default=None, description="要删除的偏好类型（从 genres 中剔除）")
     note: Optional[str] = Field(default=None, description="偏好备注（覆盖写）")
     preferences: Optional[dict] = Field(
         default=None,
@@ -35,10 +36,11 @@ class PrefPutReq(BaseModel):
 def _merge_prefs(
     user_id: str,
     genres: Optional[List[str]],
+    remove_genres: Optional[List[str]],
     note: Optional[str],
     extra: Optional[dict],
 ) -> dict:
-    """合并更新偏好：genres 去重追加，note/其余键值覆盖写，最后落库返回最新 prefs。"""
+    """合并更新偏好：genres 去重追加、remove_genres 剔除、note/其余键值覆盖写，最后落库返回最新 prefs。"""
     store = get_memory_store()
     d = store.load(user_id)
     prefs = d.setdefault("preferences", {})
@@ -47,6 +49,10 @@ def _merge_prefs(
         for g in genres:
             if g and g not in cur:
                 cur.append(g)
+    if remove_genres:
+        cur = prefs.setdefault("genres", [])
+        drop = set(remove_genres)
+        prefs["genres"] = [g for g in cur if g not in drop]
     if note is not None:
         prefs["note"] = note
     if extra:
@@ -70,7 +76,7 @@ def get_preferences(auth: CurrentUser = Depends(get_current_user)):
 
 @router.put("/preferences")
 def put_preferences(req: PrefPutReq, auth: CurrentUser = Depends(get_current_user)):
-    prefs = _merge_prefs(auth.user_id, req.genres, req.note, req.preferences)
+    prefs = _merge_prefs(auth.user_id, req.genres, req.remove_genres, req.note, req.preferences)
     return {"user_id": auth.user_id, "preferences": prefs}
 
 
