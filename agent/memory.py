@@ -220,8 +220,10 @@ class MySQLMemoryStore(MemoryStore):
     """偏好记忆的 MySQL 后端：落 `movie_agent.user_preferences` 表（与 imdb 语料库隔离）。
 
     设计要点（与既有 FallbackMemoryStore「绝不阻塞主链路」原则一致）：
-    - 构造时尝试建库（CREATE DATABASE IF NOT EXISTS movie_agent）+ 建表；连不上则 use_mysql=False，
-      全程回退 FileMemoryStore，不抛异常、不阻塞主推荐链路。
+    - 业务代码**严禁**包含任何建库/建表语句。表结构由独立文件 `db/schema/movie_agent.sql` 定义，
+      需手动执行 `scripts/init_movie_agent_db.py` 初始化。
+    - 构造时仅「探测」表是否存在 / 可读（SELECT 1 FROM user_preferences LIMIT 1）；
+      表不存在或不可达则 use_mysql=False，全程回退 FileMemoryStore，不抛异常、不阻塞主推荐链路。
     - load/save 每次调用若 MySQL 抛异常，自动转 file 兜底。
     - 单一 JSON 字段 data 存整份 {user_id, preferences, history}，与 FallbackMemoryStore 结构完全一致，
       因此 Agent（graph.py / tools.py 的 remember_preference）与前端 /memory 接口共用同一张表 = 真正打通。
@@ -236,37 +238,22 @@ class MySQLMemoryStore(MemoryStore):
         self.use_mysql = False
         self._engine = None
         try:
-            # 1) 先连「无库名」实例建库（复用 IMDB_MYSQL_* 同实例同账号）
-            root_eng = create_engine(settings.MOVIE_AGENT_MYSQL_ROOT_DSN, pool_pre_ping=True)
-            with root_eng.connect() as c:
-                c.execute(
-                    text(
-                        f"CREATE DATABASE IF NOT EXISTS `{mysql_db}` "
-                        "DEFAULT CHARACTER SET utf8mb4"
-                    )
-                )
-                c.commit()
-            # 2) 连 movie_agent 库，建表
+            # 仅探测表是否存在 / 可读；不建库、不建表（DDL 见 db/schema/movie_agent.sql）
             self._engine = create_engine(
                 settings.MOVIE_AGENT_MYSQL_DSN, pool_pre_ping=True, pool_recycle=3600
             )
             with self._engine.connect() as c:
-                c.execute(
-                    text(
-                        "CREATE TABLE IF NOT EXISTS user_preferences ("
-                        "  user_id VARCHAR(64) PRIMARY KEY,"
-                        "  data JSON NOT NULL,"
-                        "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
-                        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
-                    )
-                )
-                c.commit()
+                c.execute(text("SELECT 1 FROM user_preferences LIMIT 1"))
             self.use_mysql = True
             logger.info("MySQLMemoryStore: 已启用 movie_agent.user_preferences 作为偏好记忆库")
         except Exception as e:  # noqa: BLE001
             self.use_mysql = False
             self._engine = None
-            logger.warning("MySQLMemoryStore: 无法连接 movie_agent，回退 file 兜底：%s", e)
+            logger.warning(
+                "MySQLMemoryStore: movie_agent.user_preferences 不可达或表不存在"
+                "（请先执行 db/schema/movie_agent.sql 初始化），已回退 file 兜底：%s",
+                e,
+            )
 
     def load(self, uid: str) -> dict:
         if self.use_mysql and self._engine is not None:

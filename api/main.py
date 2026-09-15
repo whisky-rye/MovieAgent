@@ -16,13 +16,18 @@ import re
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from api.routes.memory import router as memory_router  # G4：偏好记忆接口
+from api.routes.sessions import router as sessions_router  # G3：会话管理接口
+from api.routes.auth import router as auth_router  # G1：登录/注册/me
+from api.deps import get_current_user, CurrentUser  # G1：鉴权依赖（注入 user_id）
+from agent.session_store import get_session_store  # G3：会话落库
 from pydantic import BaseModel, Field
 
 from config.logging_setup import setup_logging
@@ -54,6 +59,10 @@ app.add_middleware(
 
 # G4 路由：偏好记忆对外接口（/memory/preferences 等）
 app.include_router(memory_router)
+# G3 路由：会话管理对外接口（/sessions 等）
+app.include_router(sessions_router)
+# G1 路由：登录/注册/me（无需鉴权即可访问，用于拿 token）
+app.include_router(auth_router)
 
 
 @app.middleware("http")
@@ -75,6 +84,9 @@ async def log_http_requests(request: Request, call_next):
             pass
     response = await call_next(request)
     latency_ms = int((time.time() - t0) * 1000)
+    # 初始化 request.state.user_id（供鉴权依赖/日志使用；鉴权模式下会被 token 内的权威值覆盖）
+    if not hasattr(request.state, "user_id"):
+        request.state.user_id = "default"
     extra = {"event": "http_request", "method": request.method, "path": request.url.path,
              "status_code": response.status_code,
              "client": request.client.host if request.client else "-",
@@ -88,11 +100,18 @@ async def log_http_requests(request: Request, call_next):
 logger_api.info(
     "服务启动", extra={"event": "startup", "env": settings.APP_ENV,
     "llm_provider": settings.LLM_PROVIDER, "memory_backend": get_memory_store().backend(),
+    "session_backend": get_session_store().backend(),
     "cache_backend": get_cache().backend(), "guardrail": settings.GUARDRAIL_ENABLED,
     "ratelimit": settings.RATELIMIT_ENABLED, "log_body": settings.LLM_LOG_BODY,
     "langsmith_tracing": _LS_ENABLED,
     "langsmith_project": settings.LANGSMITH_PROJECT or "-"},
 )
+
+if settings.AUTH_ENABLED and not settings.AUTH_SECRET:
+    logger_api.warning(
+        "鉴权已启用（AUTH_ENABLED=true）但 AUTH_SECRET 为空，token 签名不安全！"
+        "请在 .env 配置 AUTH_SECRET 后再启用鉴权。"
+    )
 
 # 模块级编译一次，所有请求复用（避免每次重新构图）
 _AGENT = build_agent()
@@ -183,6 +202,9 @@ class RecommendReq(BaseModel):
     query: str = Field(..., min_length=1, description="用户自然语言查询")
     user_id: str = "default"
     top_k: int = Field(default=10, ge=1, le=50)
+    session_id: Optional[str] = Field(
+        default=None, description="会话 ID（多会话管理；空=临时对话不落库）"
+    )
 
 
 class ChatReq(BaseModel):
@@ -199,21 +221,26 @@ def health():
         "version": app.version,
         "cache_backend": get_cache().backend(),
         "memory_backend": get_memory_store().backend(),
+    "session_backend": get_session_store().backend(),
     }
 
 
 @app.post("/recommend")
-def recommend(req: RecommendReq, request: Request):
+def recommend(
+    req: RecommendReq,
+    request: Request,
+    auth: CurrentUser = Depends(get_current_user),
+):
     # P4.2：缓存优先（Redis / 进程内兜底），命中直接返回
     cache = get_cache()
-    ck = cache_key(req.query, req.user_id, str(req.top_k))
+    ck = cache_key(req.query, auth.user_id, str(req.top_k))
     hit = cache.get(ck)
     if hit is not None:
         out = dict(hit)
         out["cached"] = True
         out["cache_backend"] = cache.backend()
         logger_api.info(
-            "recommend 缓存命中", extra={"event": "recommend", "user_id": req.user_id,
+            "recommend 缓存命中", extra={"event": "recommend", "user_id": auth.user_id,
             "request_id": request.state.request_id, "cached": True,
             "cache_backend": cache.backend(), "intent": out.get("intent"),
             "count": out.get("count")},
@@ -223,7 +250,7 @@ def recommend(req: RecommendReq, request: Request):
     request_id = request.state.request_id
     t0 = time.time()
     try:
-        state = _run(req.query, req.user_id, request_id=request_id)
+        state = _run(req.query, auth.user_id, request_id=request_id)
     except RateLimited as e:  # 限流触发：标准 429 + Retry-After
         raise HTTPException(
             status_code=429,
@@ -232,14 +259,14 @@ def recommend(req: RecommendReq, request: Request):
         )
     except Exception as e:  # noqa: BLE001 - 接口层兜底，向上抛 500
         logger_api.exception(
-            "recommend 失败", extra={"event": "api_error", "user_id": req.user_id,
+            "recommend 失败", extra={"event": "api_error", "user_id": auth.user_id,
             "request_id": request_id, "query": req.query},
         )
         raise HTTPException(status_code=500, detail=f"推荐失败: {e}")
     items = state["items"][: req.top_k]
     resp = {
         "query": req.query,
-        "user_id": req.user_id,
+        "user_id": auth.user_id,
         "request_id": request_id,
         "intent": state["intent"],
         "answer": state["answer"],
@@ -254,7 +281,7 @@ def recommend(req: RecommendReq, request: Request):
         "guardrail": state.get("guardrail", {"action": "allow", "category": "ok", "reason": ""}),
     }
     logger_api.info(
-        "recommend 完成", extra={"event": "recommend", "user_id": req.user_id,
+        "recommend 完成", extra={"event": "recommend", "user_id": auth.user_id,
         "request_id": request_id, "cached": False, "cache_backend": cache.backend(),
         "intent": state["intent"], "count": len(items),
         "elapsed_ms": resp["elapsed_ms"],
@@ -265,18 +292,22 @@ def recommend(req: RecommendReq, request: Request):
 
 
 @app.post("/chat")
-async def chat(req: ChatReq, request: Request):
+async def chat(
+    req: ChatReq,
+    request: Request,
+    auth: CurrentUser = Depends(get_current_user),
+):
     """流式对话：Agent 同步调用放到线程，避免阻塞事件循环；按句推送（伪流式体验）。"""
     request_id = request.state.request_id
     async def gen():
         try:
-            state = await asyncio.to_thread(_run, req.query, req.user_id, request_id)
+            state = await asyncio.to_thread(_run, req.query, auth.user_id, request_id)
         except RateLimited as e:  # 流式接口无法回 429 状态码，推提示文本
             yield f"请求过于频繁，请 {max(1, int(e.retry_after))} 秒后再试。\n"
             return
         except Exception as e:  # noqa: BLE001
             logger_api.exception(
-                "chat 失败", extra={"event": "api_error", "user_id": req.user_id,
+                "chat 失败", extra={"event": "api_error", "user_id": auth.user_id,
                 "request_id": request_id, "query": req.query},
             )
             yield f"抱歉，出错了：{e}\n"
@@ -296,8 +327,45 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _persist_session(session_id: str, user_id: str, query: str, done_payload: dict) -> None:
+    """G3 落库：把本轮 (user, assistant) 消息写入会话（带归属校验）。
+
+    失败仅记 warning，绝不阻塞已返回的流式结果；MySQL 不可达时 SessionStore 自动回退 file。
+    """
+    try:
+        store = get_session_store()
+        if not store.assert_owner(session_id, user_id):
+            logger_api.warning(
+                "会话归属校验失败，跳过落库",
+                extra={"event": "session_skip", "session_id": session_id, "user_id": user_id},
+            )
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        store.append_message(
+            session_id,
+            {"role": "user", "content": query, "created_at": now},
+        )
+        store.append_message(
+            session_id,
+            {
+                "role": "assistant",
+                "content": done_payload.get("answer", ""),
+                "items": done_payload.get("items", []),
+                "steps": done_payload.get("steps", []),
+                "thinking": done_payload.get("thinking", {}),
+                "created_at": now,
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        logger_api.warning("会话落库失败（不影响已返回的流式结果）：%s", e)
+
+
 @app.post("/recommend/stream")
-async def recommend_stream(req: RecommendReq, request: Request):
+async def recommend_stream(
+    req: RecommendReq,
+    request: Request,
+    auth: CurrentUser = Depends(get_current_user),
+):
     """结构化流式推荐（SSE）：实时推送工具链步骤、大模型思考过程、答案 token，最后 done。
 
     事件协议（前端接入约定）：
@@ -317,7 +385,7 @@ async def recommend_stream(req: RecommendReq, request: Request):
     if g.action != "allow":
         logger_api.warning("guardrail 拦截（stream）",
                            extra={"event": "guardrail", "action": g.action,
-                                  "category": g.category, "user_id": req.user_id,
+                                  "category": g.category, "user_id": auth.user_id,
                                   "request_id": request_id, "query": req.query})
 
         async def _block():
@@ -327,10 +395,10 @@ async def recommend_stream(req: RecommendReq, request: Request):
 
     # 限流（锁前、仅真实 LLM 才扣令牌）
     if settings.RATELIMIT_ENABLED:
-        ok, retry_after = get_limiter().consume(req.user_id)
+        ok, retry_after = get_limiter().consume(auth.user_id)
         if not ok:
             logger_api.warning("rate_limited 限流触发（stream）",
-                               extra={"event": "rate_limited", "user_id": req.user_id,
+                               extra={"event": "rate_limited", "user_id": auth.user_id,
                                       "request_id": request_id, "retry_after": retry_after})
 
             async def _limited():
@@ -340,7 +408,7 @@ async def recommend_stream(req: RecommendReq, request: Request):
 
     ev_q: "queue.Queue" = queue.Queue()
     init_state = {
-        "user_id": req.user_id,
+        "user_id": auth.user_id,
         "query": req.query,
         "request_id": request_id,
         "steps": [],
@@ -358,11 +426,11 @@ async def recommend_stream(req: RecommendReq, request: Request):
             try:
                 final = _AGENT.invoke(
                     init_state,
-                    config={"metadata": run_metadata(req.user_id, request_id)},
+                    config={"metadata": run_metadata(auth.user_id, request_id)},
                 )
             except Exception as e:  # noqa: BLE001
                 logger_api.exception("recommend/stream 运行异常",
-                                     extra={"event": "api_error", "user_id": req.user_id,
+                                     extra={"event": "api_error", "user_id": auth.user_id,
                                             "request_id": request_id, "query": req.query})
                 ev_q.put(("error", str(e)))
 
@@ -394,7 +462,7 @@ async def recommend_stream(req: RecommendReq, request: Request):
         th.join()
         ranked = final.get("ranked", []) or []
         items = [_candidate_to_dict(c) for c in ranked][: req.top_k]
-        yield _sse("done", {
+        done_payload = {
             "request_id": request_id,
             "intent": final.get("intent", ""),
             "answer": final.get("answer", ""),
@@ -403,7 +471,13 @@ async def recommend_stream(req: RecommendReq, request: Request):
             "steps": final.get("steps", []),
             "thinking": final.get("thinking", {}),
             "elapsed_ms": int((time.time() - t0) * 1000),
-        })
+        }
+        yield _sse("done", done_payload)
+        # G3：done 后落会话（带 session_id 且归属校验通过才写；异步线程不阻塞流式返回）
+        if req.session_id:
+            await asyncio.to_thread(
+                _persist_session, req.session_id, auth.user_id, req.query, done_payload
+            )
 
     return StreamingResponse(_gen(), media_type="text/event-stream")
 
