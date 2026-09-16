@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     AUTH_TOKEN_TTL: int = 604800                # token 有效期（秒），默认 7 天
     AUTH_PBKDF2_ITERATIONS: int = 100000        # 密码哈希迭代次数
     AUTH_FILE_ROOT: str = "data/users"          # UserStore 的 file 兜底根目录
+    # ---- 鉴权 Cookie / CSRF（Token→httpOnly Cookie 方案） ----
+    AUTH_COOKIE_NAME: str = "ma_token"          # 鉴权 Cookie（HttpOnly，不可被 JS 读取，防 XSS 窃取）
+    AUTH_COOKIE_SAMESITE: str = "lax"           # lax：允许同站跨端口（前端 5173 ↔ 后端 8000）携带
+    CSRF_COOKIE_NAME: str = "ma_csrf"           # 双提交 CSRF token（非 HttpOnly，供前端 JS 读取）
+    CSRF_HEADER_NAME: str = "X-CSRF-Token"      # 前端把 ma_csrf 值放入此请求头，后端校验一致
+    COOKIE_SECURE: bool = False                 # True=仅 HTTPS 传输；生产(HTTPS)自动置 True（见 auth 路由）
 
     # ---- 本地 Ollama（已就绪，仅核对） ----
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"  # Ollama 默认端口（实测含 bge-m3/qwen3.5/deepseek）
@@ -131,8 +137,25 @@ class Settings(BaseSettings):
     GUARDRAIL_BLOCK_OFFTOPIC: bool = True   # 越域（非影视）是否引导；False 则交给 Agent 降级处理
     GUARDRAIL_MODE: str = "rule"            # rule（零额度，纯本地规则）| hybrid（边界 case 调 chat_light 复核）
 
-    # ---- 限流（P5 补充：令牌桶，内存级单进程） ----
+    # ---- 限流（P5 补充：令牌桶） ----
+    # 后端：redis（默认，多进程/多机部署）= 共享桶，总配额稳定 = 单桶配额；
+    #       memory（单进程/调试）= 每 worker 各一个桶（多 worker 时总配额 = 单桶配额 × workers）。
+    #       Redis 不可达时自动回退 memory 并告警。
+    # 注意：多 worker 部署（P0）务必用 redis 后端，否则各 worker 各自计数，限流形同虚设。
     RATELIMIT_ENABLED: bool = True   # 总开关；False 则不限制
+    RATELIMIT_BACKEND: str = "redis"  # memory | redis
+    RATELIMIT_REDIS_URL: str = ""    # 留空则复用 REDIS_URL（共享令牌桶）
+
+    # ---- 并发控制（P0 多 worker + 每请求客户端） ----
+    # 单 worker 内允许「真正并行」执行的 Agent/LLM 调用数（其余排队）。配合多 worker 部署，
+    # 理论并发 ≈ workers × MAX_CONCURRENT_RUNS。值过大可能压垮本地模型 / 触发云端额度熔断，按需调小。
+    # 取代旧版「全局串行锁」——不再把全部请求单飞成 1 并发，而是有界并行。
+    MAX_CONCURRENT_RUNS: int = 4
+    # 并发槽获取超时（秒）：超过则视为过载，请求返回 503（而非无限阻塞占用连接）。
+    RUN_SLOT_TIMEOUT: int = 30
+    # 多 worker 启动时的 worker 数（仅 api/main.py 的 __main__ 入口读取；命令行 `--workers` 优先）。
+    # 1 = 单进程（开发期默认）；生产多核机器建议 2~4。
+    UVICORN_WORKERS: int = 1
     RATELIMIT_RATE: float = 0.2      # 令牌补充速率（个/秒）= 每 5 秒允许 1 次真实 LLM 调用
     RATELIMIT_BURST: int = 3         # 桶容量（突发上限）= 允许瞬时最多 3 次真实调用
 

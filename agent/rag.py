@@ -153,17 +153,26 @@ def _fallback_explanation(query: str, ranked: list[Candidate], prefs_s: str) -> 
 
 def _generate_rich(query: str, ranked: list[Candidate], prefs: dict,
                    user_id: str, request_id: str = "",
-                   token_sink=None, thinking_sink=None):
+                   token_sink=None, thinking_sink=None, history: str = ""):
     """端到端：检索上下文 + 强档 LLM -> (解说文本, 思考过程)。
 
     - token_sink/thinking_sink 为 None 时走非流式 invoke（/recommend 用）；
     - 提供 sink 时走 llm.stream 实时推送答案 token 与思考 delta（/recommend/stream 用）。
+    - history：来自会话历史压缩的上下文串（"" 表示无历史），用于多轮连贯推荐。
     任一失败都回退到模板解说，保证「永远有可解释 answer」。
     """
     context = build_context(ranked)
     prefs_s = "，".join(prefs.get("genres", [])) or "（暂无）"
+    if history:
+        history_block = (
+            "前文对话概要（多轮上下文，用于连贯推荐，勿重复已推荐/已拒绝的影片）：\n"
+            + history
+        )
+    else:
+        history_block = "前文对话：无"
     prompt = EXPLAIN_PROMPT.format(query=query or "（未明确）",
-                                   prefs=prefs_s, context=context)
+                                   prefs=prefs_s, context=context,
+                                   history_block=history_block)
     llm = chat_strong(user_id=user_id, request_id=request_id)
     answer_parts: list[str] = []
     thinking_parts: list[str] = []

@@ -8,7 +8,7 @@
 //    网络断线(network)、流中断(stream)、服务端(server/http)
 //  - 解析器改用 utils/sse 的 createSSEParser，正确处理跨 chunk 分片
 
-import { API_BASE } from './client'
+import { API_BASE, getCookie } from './client'
 import { createSSEParser } from '../utils/sse'
 import type { ChatStep, DonePayload, StreamError } from '../types'
 
@@ -59,9 +59,10 @@ export async function streamRecommend(
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  const token = localStorage.getItem('ma_token')
+  // 鉴权走 httpOnly Cookie（credentials:'include' 自动携带），CSRF 双提交从可读 Cookie 取 ma_csrf。
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (token) headers['Authorization'] = `Bearer ${token}`
+  const csrf = getCookie('ma_csrf')
+  if (csrf) headers['X-CSRF-Token'] = csrf
 
   handlers.onConnecting?.()
   let res: Response
@@ -70,6 +71,7 @@ export async function streamRecommend(
       method: 'POST',
       headers,
       body: JSON.stringify({ query, session_id: sessionId }),
+      credentials: 'include',
       signal,
     })
   } catch (e: unknown) {

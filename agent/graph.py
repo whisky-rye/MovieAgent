@@ -300,6 +300,7 @@ def _generate(state: AgentState) -> AgentState:
         state.get("query", ""), ranked, prefs, uid,
         request_id=state.get("request_id", ""),
         token_sink=token_sink, thinking_sink=thinking_sink,
+        history=state.get("history", "") or "",
     )
     elapsed = int((time.time() - t0) * 1000)
     # 来源标记：对话末尾追加一句话来源概况；详细分源结构走 API sources 字段

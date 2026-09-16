@@ -31,9 +31,12 @@ class CurrentUser:
 
 
 async def get_current_user(request: Request) -> CurrentUser:
-    # 先解析 Bearer token（两种模式下一视同仁：合法 token 永远优先）
+    # 先解析 Bearer token（两种模式下一视同仁：合法 token 永远优先，便于 API 客户端）
     auth = request.headers.get("authorization", "")
     token = auth[7:].strip() if auth.startswith("Bearer ") else None
+    # 浏览器走 httpOnly Cookie（ma_token），JS 不可读，防 XSS 窃取
+    if not token:
+        token = request.cookies.get(settings.AUTH_COOKIE_NAME)
     payload = verify_token(token) if token else None  # 无效/过期返回 None
 
     if payload is not None:
