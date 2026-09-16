@@ -56,6 +56,17 @@ export interface SessionSummary {
   created_at: string | null
   updated_at: string | null
   preview: string
+  shared?: boolean       // 是否已共享（公开只读）
+  share_token?: string   // 共享令牌（已共享时存在）
+}
+
+// 公开只读会话（GET /share/{token}，无需登录）
+export interface SharedSession {
+  share_token: string
+  title: string
+  created_at: string | null
+  updated_at: string | null
+  messages: ChatMessage[]
 }
 
 // /recommend/stream 的 done 事件载荷

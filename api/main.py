@@ -29,6 +29,7 @@ from api.routes.memory import router as memory_router  # G4：偏好记忆接口
 from api.routes.sessions import router as sessions_router  # G3：会话管理接口
 from api.routes.auth import router as auth_router  # G1：登录/注册/me
 from api.routes.export import router as export_router  # 会话历史导出（zip）
+from api.routes.share import router as share_router  # G-Share：会话共享 / 公开只读查看
 from api.deps import get_current_user, CurrentUser  # G1：鉴权依赖（注入 user_id）
 from agent.session_store import get_session_store  # G3：会话落库
 from pydantic import BaseModel, Field
@@ -143,6 +144,8 @@ app.include_router(sessions_router)
 app.include_router(auth_router)
 # 会话历史导出（GET /export/sessions -> zip 附件）
 app.include_router(export_router)
+# G-Share 会话共享：分享/取消（鉴权）/ 公开只读查看 /share/{token}（无鉴权）
+app.include_router(share_router)
 
 
 @app.middleware("http")

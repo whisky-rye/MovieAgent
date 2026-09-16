@@ -32,6 +32,17 @@ CREATE TABLE IF NOT EXISTS `sessions` (
   KEY `idx_sessions_user` (`user_id`, `updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- G-Share 会话共享：session_id -> 不可猜测令牌（一个会话至多一个有效令牌）。
+-- 公开只读查看 GET /share/{token} 仅凭令牌读取，不暴露 owner；未共享/令牌无效返回 404。
+CREATE TABLE IF NOT EXISTS `shared_sessions` (
+  `session_id`      VARCHAR(64)  NOT NULL PRIMARY KEY,
+  `owner_user_id`   VARCHAR(64)  NOT NULL,
+  `share_token`     VARCHAR(64)  NOT NULL,
+  `created_at`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY `uniq_shared_token` (`share_token`),
+  KEY `idx_shared_owner` (`owner_user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- G1 用户账户（G1 落地时启用；此处先备好 DDL，便于一键初始化）
 CREATE TABLE IF NOT EXISTS `users` (
   `username`   VARCHAR(64)  NOT NULL PRIMARY KEY,

@@ -17,9 +17,8 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from agent.auth_crypto import hash_password, issue_token
+from agent.auth_crypto import hash_password, issue_token, verify_token
 from agent.user_store import get_user_store
-from api.deps import CurrentUser, get_current_user
 from config.settings import settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -105,5 +104,15 @@ def logout(response: Response):
 
 
 @router.get("/me")
-def me(auth: CurrentUser = Depends(get_current_user)):
-    return auth.dict()
+def me(request: Request):
+    # /auth/me 语义是"回显当前登录用户"，必须凭真实 token（Bearer 或 Cookie），
+    # 不走 get_current_user 的调试兜底（AUTH_ENABLED=false 时无 token 也会 200 + default，
+    # 导致退出登录后刷新页面被误判为已登录、直接进首页——已修复）。
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else None
+    if not token:
+        token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    payload = verify_token(token) if token else None
+    if payload is None:
+        raise HTTPException(status_code=401, detail="未登录")
+    return {"user_id": payload["user_id"], "username": payload.get("username")}

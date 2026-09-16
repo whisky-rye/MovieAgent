@@ -20,10 +20,21 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from agent.session_store import get_session_store
+from agent.share_store import get_share_store
 from api.deps import CurrentUser, get_current_user
 from api.items_backfill import backfill_item_ids
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+# 共享状态装饰：把「是否共享 / 共享令牌」附加到会话对象上，供前端展示「已共享」徽标与复制链接。
+_share_store = get_share_store()
+
+
+def _decorate_share(session: dict) -> dict:
+    token = _share_store.get_token_by_session(session.get("session_id"))
+    session["shared"] = bool(token)
+    session["share_token"] = token
+    return session
 
 
 class SessionCreateReq(BaseModel):
@@ -44,7 +55,8 @@ def create_session(req: SessionCreateReq, auth: CurrentUser = Depends(get_curren
 
 @router.get("")
 def list_sessions(auth: CurrentUser = Depends(get_current_user)):
-    return get_session_store().list_by_user(auth.user_id)
+    items = get_session_store().list_by_user(auth.user_id)
+    return [_decorate_share(s) for s in items]
 
 
 def _require_owner(session_id: str, user_id: str) -> dict:
@@ -65,7 +77,7 @@ def get_session(session_id: str, auth: CurrentUser = Depends(get_current_user)):
     for msg in rec.get("messages") or []:
         if isinstance(msg, dict) and msg.get("items"):
             backfill_item_ids(msg["items"])
-    return rec
+    return _decorate_share(rec)
 
 
 @router.patch("/{session_id}")

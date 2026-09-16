@@ -2,6 +2,7 @@
 import { ref, nextTick, onBeforeUnmount, watch, computed } from 'vue'
 import MessageItem from './MessageItem.vue'
 import { streamRecommend } from '../api/stream'
+import suggestionsData from '../data/suggestions.json'
 import {
   currentSessionId, currentMessages, sessionsLoading, newSession, pushMessage,
   updateLastAssistant, selectSession, truncateAfter,
@@ -23,12 +24,27 @@ let cooldownTimer: number | null = null
 let autoRetryUsed = false
 let autoRetryTimer: number | null = null
 
-const prompts = [
-  '推荐几部赛博朋克风格的科幻片',
-  '适合周末看的轻松喜剧',
-  '诺兰导演的烧脑电影',
-  '近十年高分悬疑片',
-]
+// 首页空状态推荐语句：300 条语料（scripts/gen_prompt_suggestions.py 生成），每次随机取 4 条展示，
+// 点"换一批"按钮从不重复于当前批次的剩余语句里再抽 4 条。
+const ALL_PROMPTS: string[] = suggestionsData.suggestions
+const BATCH_SIZE = 4
+
+function pickBatch(exclude: Set<string>): string[] {
+  const pool = ALL_PROMPTS.filter((p) => !exclude.has(p))
+  const source = pool.length >= BATCH_SIZE ? pool : ALL_PROMPTS // 语料足够时排除当前批次，避免连点重复
+  const shuffled = [...source]
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
+  }
+  return shuffled.slice(0, BATCH_SIZE)
+}
+
+const prompts = ref<string[]>(pickBatch(new Set()))
+
+function refreshPrompts() {
+  prompts.value = pickBatch(new Set(prompts.value))
+}
 
 const busy = computed(() => connecting.value || streaming.value)
 
@@ -292,6 +308,19 @@ watch(currentSessionId, () => {
         <p>描述你的观影心情、类型偏好或导演演员，AI 会推荐合适的影片。</p>
         <div class="chips">
           <button v-for="p in prompts" :key="p" class="chip" :disabled="busy" @click="send(p)">{{ p }}</button>
+          <button
+            class="chip refresh"
+            :disabled="busy"
+            title="换一批推荐"
+            aria-label="换一批推荐"
+            @click="refreshPrompts"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
+          </button>
         </div>
       </div>
     </div>
@@ -350,6 +379,15 @@ watch(currentSessionId, () => {
 }
 .chip:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .chip:disabled { opacity: 0.5; cursor: default; }
+/* "换一批"按钮：与语句气泡同高的圆形图标钮 */
+.chip.refresh {
+  width: 34px; height: 34px; padding: 0; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%; color: var(--muted);
+}
+.chip.refresh svg { width: 15px; height: 15px; display: block; }
+.chip.refresh:hover:not(:disabled) { transform: rotate(60deg); }
+.chip.refresh { transition: transform 0.3s ease, border-color 0.2s ease, color 0.2s ease; }
 
 .messages { grid-row: 1; min-height: 0; overflow-y: auto; padding: 20px 24px; }
 .typing { font-size: 13px; color: var(--muted); margin-top: 8px; }

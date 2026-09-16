@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     SESSION_FILE_ROOT: str = "data/sessions"   # file 兜底根目录
     SESSION_MAX_MESSAGES: int = 200            # 单会话消息上限（超出截断最旧，防无限膨胀）
 
+    # ---- 会话共享（公开只读查看 /share/{token}）：shared_sessions 表落 movie_agent，连不上回退 file ----
+    SHARED_FILE_ROOT: str = "data/shared"      # 共享映射 file 兜底根目录（session_id -> token）
+    # 共享链接对外域名前缀：复制出去的链接 = {APP_PUBLIC_ORIGIN}/share/{token}，外部访客直接打开即可。
+    # 部署时改成前端实际对外地址（如 https://movie.example.com）；留空则回退 VITE_API_BASE 同源前端。
+    APP_PUBLIC_ORIGIN: str = "http://localhost:5173"
+
     # ---- 鉴权（G1）：登录/注册 token（零新依赖，stdlib pbkdf2 + HMAC） ----
     # 总开关：true=强制 Bearer token 鉴权（业务 user_id 取自 token、忽略 body 防越权）；
     #         false=退回 body/query.user_id 旧模式（调试兼容，现有 curl/前端联调不中断）

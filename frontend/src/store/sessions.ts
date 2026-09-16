@@ -3,6 +3,7 @@
 
 import { reactive, computed } from 'vue'
 import { apiFetch } from '../api/client'
+import { shareSession as apiShare, unshareSession as apiUnshare } from '../api/share'
 import type { ChatMessage, SessionSummary } from '../types'
 
 interface SessionState {
@@ -67,6 +68,7 @@ export async function loadSessions(): Promise<void> {
   state.listError = null
   try {
     const list = await apiFetch<SessionSummary[]>('/sessions')
+    // 后端已附带 shared / share_token 字段，直接保留即可
     state.list = list
   } catch {
     state.list = []
@@ -74,6 +76,26 @@ export async function loadSessions(): Promise<void> {
   } finally {
     state.loaded = true
     state.listLoading = false
+  }
+}
+
+// —— 会话共享（G-Share）——
+export async function shareSession(sid: string): Promise<string> {
+  const data = await apiShare(sid)
+  const item = state.list.find((s) => s.session_id === sid)
+  if (item) {
+    item.shared = true
+    item.share_token = data.share_token
+  }
+  return data.share_url
+}
+
+export async function unshareSession(sid: string): Promise<void> {
+  await apiUnshare(sid)
+  const item = state.list.find((s) => s.session_id === sid)
+  if (item) {
+    item.shared = false
+    item.share_token = undefined
   }
 }
 
