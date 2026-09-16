@@ -28,6 +28,8 @@ EXTRA_KEYS = (
     "intent", "action", "category", "status_code", "path", "method",
     "client", "retry_after", "input_chars", "output_chars",
     "input_text", "output_text",
+    # 海报视觉模型（G-Poster）专用维度
+    "poster_url", "media_type", "task_id", "image_size", "model_family", "top_n",
 )
 
 
@@ -93,6 +95,17 @@ def setup_logging() -> None:
     llm_fh.setFormatter(fmt)
     llm_logger.addHandler(llm_fh)
     llm_logger.propagate = True
+
+    # 专用百炼视觉模型调用日志（movie_agent.bailian）：海报生成提示词、模型、输入输出 token、耗时、产物 URL
+    bailian_logger = logging.getLogger("movie_agent.bailian")
+    bailian_fh = RotatingFileHandler(
+        os.path.join(log_dir, "bailian_calls.log"),
+        maxBytes=5_000_000, backupCount=5, encoding="utf-8",
+    )
+    bailian_fh.setLevel(logging.INFO)
+    bailian_fh.setFormatter(fmt)
+    bailian_logger.addHandler(bailian_fh)
+    bailian_logger.propagate = True
 
     # 抑制过于啰嗦的第三方库访问日志（结构化访问日志由本服务中间件负责）
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

@@ -2,6 +2,7 @@
 import { ref, nextTick, onBeforeUnmount, watch, computed } from 'vue'
 import MessageItem from './MessageItem.vue'
 import { streamRecommend } from '../api/stream'
+import { fetchPoster } from '../api/client'
 import suggestionsData from '../data/suggestions.json'
 import {
   currentSessionId, currentMessages, sessionsLoading, newSession, pushMessage,
@@ -175,6 +176,10 @@ async function startStream(q: string, sid: string, pushUser: boolean) {
             m.streaming = false
           })
           scrollToBottom(true)
+          // G-Poster：对话完成后异步生成 Top3 海报，轮询回填到本条助手消息
+          if (p.items && p.items.length && currentSessionId.value) {
+            pollPoster(currentSessionId.value)
+          }
         },
         onError: (err: StreamError) => {
           updateLastAssistant((m) => {
@@ -264,6 +269,42 @@ function doRetry() {
 function retryLast() {
   autoRetryUsed = false
   doRetry()
+}
+
+// G-Poster：轮询会话海报状态，就绪后回填到「当前最后一条助手消息」。
+// 用自增 token 防止重叠对话时把旧轮询错误地挂到新消息上；新对话开始即作废旧轮询。
+let posterPollToken = 0
+let posterTimer: ReturnType<typeof setTimeout> | null = null
+function pollPoster(sid: string, maxAttempts = 90) {
+  const token = ++posterPollToken
+  let attempts = 0
+  const tick = async () => {
+    if (token !== posterPollToken) return // 已被新对话取代
+    try {
+      const st = await fetchPoster(sid)
+      if (st.status === 'ready' && st.url) {
+        updateLastAssistant((m) => {
+          m.poster = {
+            url: st.url!,
+            download_url: st.download_url!,
+            model: st.model ?? '',
+            model_family: st.model_family ?? 'image',
+            media_type: st.media_type,
+            placeholder: st.placeholder,
+          }
+        })
+        return
+      }
+      if (st.status === 'error') return
+    } catch {
+      // 网络抖动：继续轮询
+    }
+    attempts += 1
+    if (attempts < maxAttempts) {
+      posterTimer = setTimeout(tick, 2000)
+    }
+  }
+  posterTimer = setTimeout(tick, 1500)
 }
 
 function stop() {

@@ -30,6 +30,7 @@ from api.routes.sessions import router as sessions_router  # G3：会话管理�
 from api.routes.auth import router as auth_router  # G1：登录/注册/me
 from api.routes.export import router as export_router  # 会话历史导出（zip）
 from api.routes.share import router as share_router  # G-Share：会话共享 / 公开只读查看
+from api.routes.poster import router as poster_router  # G-Poster：Top3 宣传海报查询/下载
 from api.deps import get_current_user, CurrentUser  # G1：鉴权依赖（注入 user_id）
 from agent.session_store import get_session_store  # G3：会话落库
 from pydantic import BaseModel, Field
@@ -43,6 +44,7 @@ from api.cache import get_cache, cache_key
 from api.ratelimit import get_limiter, RateLimited
 from agent.memory import get_memory_store
 from agent.guardrail import check_guardrail
+from agent.poster import schedule_poster  # G-Poster：对话完成后异步生成 Top3 宣传海报
 from config.settings import settings
 
 setup_logging()  # 集中式结构化日志（JSON 行 + 滚动文件 + 专用 llm_calls.log）
@@ -146,6 +148,8 @@ app.include_router(auth_router)
 app.include_router(export_router)
 # G-Share 会话共享：分享/取消（鉴权）/ 公开只读查看 /share/{token}（无鉴权）
 app.include_router(share_router)
+# G-Poster：Top3 宣传海报查询/下载（GET，CSRF 中间件天然豁免）
+app.include_router(poster_router)
 
 
 @app.middleware("http")
@@ -628,6 +632,14 @@ async def recommend_stream(
             await asyncio.to_thread(
                 _persist_session, req.session_id, auth.user_id, req.query, done_payload
             )
+            # G-Poster：异步（守护线程）生成 Top3 宣传海报，状态写入 manifest 供前端轮询
+            try:
+                schedule_poster(
+                    req.session_id, auth.user_id, request_id,
+                    done_payload.get("items", []), req.query,
+                )
+            except Exception as e:
+                logger_api.warning("海报调度失败（不影响主链路）：%s", e)
 
     return StreamingResponse(_gen(), media_type="text/event-stream")
 

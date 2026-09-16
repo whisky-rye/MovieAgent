@@ -195,6 +195,31 @@ class Settings(BaseSettings):
     # 是否传 instruct（自定义排序任务指令）；默认 True（推荐场景：匹配用户偏好）
     CLOUD_RERANK_USE_INSTRUCT: bool = True
 
+    # ---- 推荐海报生成（阿里百炼视觉模型，G-Poster） ----
+    # 每次对话完成后，调用百炼视觉模型为推荐列表 Top3 生成宣传海报（文生图）。
+    # 与 rerank/embed 同一供应商、同一 Key，专属键留空即回退 CLOUD_LLM_*。
+    # 随机触发模型见 agent/poster.py POSTER_MODELS（当前为北京 MaaS 实际可用的三款文生图模型）。
+    # 端点走百炼「模型服务」统一生成接口：/services/aigc/multimodal-generation/generation
+    #   —— 公共 dashscope 端点的 text2image/image-synthesis 路径已废弃/不可用，必须用北京专属 MaaS 网关域名。
+
+    # 北京 MaaS 网关域名二选一提供：
+    #   方案 A（推荐）：填 WorkspaceId，自动拼成 https://{WS}.{REGION}.maas.aliyuncs.com/api/v1
+    POSTER_WORKSPACE_ID: str = ""
+    POSTER_REGION: str = "cn-beijing"
+    #   方案 B：直接给完整 base（含 /api/v1）。优先级高于方案 A；两者皆空则回退 CLOUD_LLM_BASE_URL
+    CLOUD_POSTER_BASE_URL: str = ""
+    CLOUD_POSTER_API_KEY: str = ""          # 留空则复用 CLOUD_LLM_API_KEY
+    # 统一生成接口路径（MaaS 视觉模型通用，文生图/文生视频共用此路径）
+    POSTER_ENDPOINT_PATH: str = "/services/aigc/multimodal-generation/generation"
+
+    # 海报落盘目录（相对项目根）；静态下载经 /poster/download/{session_id} 路由，无需挂载 StaticFiles
+    POSTER_DATA_DIR: str = "data/poster"
+    # 生成失败/无 Key/无网络时是否自动降级为占位图（PIL 生成，便于断网演示）；默认 False（仅记日志、前端不显示海报块）
+    POSTER_FALLBACK_PLACEHOLDER: bool = False
+    # 异步任务轮询上限（秒）与轮询间隔（秒）
+    POSTER_TASK_TIMEOUT: int = 300
+    POSTER_TASK_POLL: int = 3
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

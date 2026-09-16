@@ -102,6 +102,17 @@ function imdbUrlFor(it: ChatItem): string | null {
             </div>
           </div>
         </div>
+
+        <!-- 推荐海报（G-Poster：对话完成后由百炼视觉模型生成，Top3 合图，可下载） -->
+        <div v-if="message.poster" class="poster-block">
+          <div class="poster-head">
+            <span class="poster-title">为你定制的推荐海报</span>
+            <span v-if="message.poster.model" class="poster-model">{{ message.poster.model }}</span>
+          </div>
+          <img v-if="message.poster.model_family === 'image'" :src="message.poster.url" alt="推荐海报" class="poster-img" />
+          <video v-else :src="message.poster.url" controls class="poster-img"></video>
+          <a class="poster-dl" :href="message.poster.download_url" download>下载海报 ↓</a>
+        </div>
       </template>
     </div>
   </div>
@@ -175,4 +186,21 @@ function imdbUrlFor(it: ChatItem): string | null {
 .ext:hover { filter: brightness(0.97); }
 .ext.douban { background: var(--src-douban-bg); color: var(--src-douban-fg); border-color: var(--src-douban-border); }
 .ext.imdb { background: var(--src-imdb-bg); color: var(--src-imdb-fg); border-color: var(--src-imdb-border); }
+
+.poster-block {
+  margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface); max-width: 360px;
+}
+.poster-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.poster-title { font-size: 13px; font-weight: 600; color: var(--fg); }
+.poster-model { font-size: 11px; color: var(--muted); margin-left: auto; }
+.poster-img {
+  display: block; width: 100%; height: auto; border-radius: 8px; background: var(--surface-3);
+}
+.poster-dl {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 8px;
+  font-size: 12px; text-decoration: none; color: var(--accent-fg); background: var(--accent);
+  padding: 6px 12px; border-radius: 8px;
+}
+.poster-dl:hover { filter: brightness(0.95); }
 </style>

@@ -60,3 +60,19 @@ export async function apiFetch<T = unknown>(path: string, init: RequestInit = {}
 
   return body as T
 }
+
+// G-Poster：轮询会话海报状态（GET，无需 CSRF）
+export interface PosterStatus {
+  status: 'none' | 'pending' | 'ready' | 'error'
+  url?: string
+  download_url?: string
+  model?: string
+  model_family?: 'image' | 'video'
+  media_type?: string
+  placeholder?: boolean
+  error?: string
+}
+
+export async function fetchPoster(sessionId: string): Promise<PosterStatus> {
+  return apiFetch<PosterStatus>(`/poster/${encodeURIComponent(sessionId)}`)
+}

@@ -27,6 +27,16 @@ export interface ChatStep {
 }
 
 // 单条对话消息（前端渲染用；user 仅含 content，assistant 含答案与候选等）
+// 对话完成后由百炼视觉模型生成的 Top3 宣传海报（G-Poster）
+export interface PosterInfo {
+  url: string // 内联预览地址（<img> / <video> src）
+  download_url: string // 触发浏览器下载的地址（?download=1）
+  model: string // 实际触发的视觉模型
+  model_family: 'image' | 'video' // 图片 or 视频
+  media_type?: string
+  placeholder?: boolean // 是否为断网占位图
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -39,6 +49,7 @@ export interface ChatMessage {
   error?: string // 错误展示文案（兼容旧字段）
   errorKind?: StreamError['kind'] // 错误类别，用于差异化展示/重试
   retryAfter?: number // 限流建议等待秒数（rate_limited 时）
+  poster?: PosterInfo // 推荐海报（对话完成后异步生成，轮询回填）
 }
 
 // 结构化错误（M6：429/护栏/断线在前端可见且优雅）
@@ -79,6 +90,7 @@ export interface DonePayload {
   steps: ChatStep[]
   thinking: Record<string, unknown>
   elapsed_ms: number
+  poster?: PosterInfo
 }
 
 // ---- 三层记忆（M5）----
