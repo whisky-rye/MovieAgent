@@ -83,11 +83,11 @@ function toggle() {
 .auth-card {
   width: 100%;
   max-width: 360px;
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 28px 24px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-md);
 }
 .brand { font-size: 20px; margin: 0 0 4px; }
 .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
@@ -96,7 +96,7 @@ label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color:
 .err { color: var(--danger); font-size: 13px; margin: 0; }
 button[type='submit'] {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   padding: 10px 12px;
   margin-top: 4px;
 }

@@ -1,13 +1,158 @@
+/* ============================================================
+   主题变量：明亮（默认）与暗色（净灰，护眼）两套。
+   所有组件颜色一律引用 var(--token)，组件内不写死色值，
+   这样切换 data-theme 即可整站换肤，且明亮模式像素级不变。
+   ============================================================ */
+
 :root {
+  /* 基础语义色（与原页面一致） */
   --fg: #1f2328;
   --muted: #6b7280;
   --line: #e5e7eb;
   --accent: #2563eb;
+  --accent-fg: #ffffff;
   --danger: #dc2626;
   --bg: #f7f8fa;
+
+  /* 表面层级 */
+  --surface: #ffffff;          /* 卡片 / 侧边栏 / 顶栏 / 输入框 */
+  --surface-2: #f3f4f6;       /* hover 态 */
+  --surface-3: #fafafa;       /* 步骤区等浅底 */
+  --surface-disabled: #f9fafb;/* 禁用输入框 */
+
+  /* 代码 / 思考块 */
+  --code-bg: #f8f9fa;
+  --code-tag-bg: #f3f4f6;
+  --code-tag-fg: #c7254e;
+  --think-bg: #faf8f0;
+  --think-fg: #6b5b3a;
+
+  /* 标签 / 胶囊（偏好 tag、召回 badge、chip） */
+  --tag-bg: #eef2ff;
+  --tag-fg: #2563eb;
+  --chip-bg: #eef2ff;
+  --chip-fg: #2563eb;
+  --chip-border: #dbe3ff;
+
+  /* 候选影片来源 / 外链 */
+  --src-douban-bg: #fff1e6;
+  --src-douban-fg: #c0501a;
+  --src-douban-border: #f6d3b8;
+  --src-imdb-bg: #eaf2ff;
+  --src-imdb-fg: #1d4ed8;
+  --src-imdb-border: #c7dbff;
+  --rating: #d97706;
+
+  /* 头像 / 记忆圆点 */
+  --assistant-avatar: #0f766e;
+  --dot-short: #0ea5e9;
+  --dot-session: #2563eb;
+  --dot-long: #0f766e;
+
+  /* 次级文字 */
+  --recall-fg: #9ca3af;
+  --step-ms: #9ca3af;
+  --step-detail: #6b7280;
+
+  /* 告警条 */
+  --alert-warn-bg: #fff7ed;
+  --alert-warn-border: #fed7aa;
+  --alert-warn-fg: #9a3412;
+  --alert-info-bg: #f0f9ff;
+  --alert-info-border: #bae6fd;
+  --alert-info-fg: #075985;
+  --alert-err-bg: #fef2f2;
+  --alert-err-border: #fecaca;
+  --alert-err-fg: #b91c1c;
+
+  /* 会话列表选中态 */
+  --item-active-bg: #eef2ff;
+  --item-active-border: #c7d2fe;
+
+  /* 遮罩 / 阴影 */
+  --overlay: rgba(0, 0, 0, 0.32);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 2px 0 12px rgba(0, 0, 0, 0.12);
 }
 
+/* 暗色模式：净灰色背景，降低对比、护眼 */
+html[data-theme='dark'] {
+  --fg: #e6e7ea;
+  --muted: #9aa1a9;
+  --line: #4a4f57;
+  --accent: #4c8dff;
+  --accent-fg: #ffffff;
+  --danger: #f06060;
+  --bg: #2b2e33;              /* 净灰色页面背景 */
+
+  --surface: #363a40;         /* 卡片等比背景略亮，制造层级 */
+  --surface-2: #42464d;
+  --surface-3: #303338;
+  --surface-disabled: #2f3237;
+
+  --code-bg: #24262a;
+  --code-tag-bg: #3a3e45;
+  --code-tag-fg: #ff9bb3;
+  --think-bg: #37342a;
+  --think-fg: #e3d3ad;
+
+  --tag-bg: #2c3852;
+  --tag-fg: #93b4ff;
+  --chip-bg: #2c3852;
+  --chip-fg: #93b4ff;
+  --chip-border: #3b4a6b;
+
+  --src-douban-bg: #3a2c20;
+  --src-douban-fg: #f0a877;
+  --src-douban-border: #5a4129;
+  --src-imdb-bg: #20304a;
+  --src-imdb-fg: #8fb4ff;
+  --src-imdb-border: #324a6b;
+  --rating: #e8a23d;
+
+  --assistant-avatar: #14b8a6;
+  --dot-short: #38bdf8;
+  --dot-session: #4c8dff;
+  --dot-long: #14b8a6;
+
+  --recall-fg: #7d838b;
+  --step-ms: #7d838b;
+  --step-detail: #9aa1a9;
+
+  --alert-warn-bg: #3a2a1c;
+  --alert-warn-border: #5c4326;
+  --alert-warn-fg: #f0b27a;
+  --alert-info-bg: #16293a;
+  --alert-info-border: #25465f;
+  --alert-info-fg: #7fc4ec;
+  --alert-err-bg: #3a1f1f;
+  --alert-err-border: #5c2c2c;
+  --alert-err-fg: #f08a8a;
+
+  --item-active-bg: #2c3852;
+  --item-active-border: #3b4a6b;
+
+  --overlay: rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 2px 0 12px rgba(0, 0, 0, 0.55);
+}
+
+html { color-scheme: light; }
+html[data-theme='dark'] { color-scheme: dark; }
+
 * { box-sizing: border-box; }
+
+/* 换肤时的柔和过渡（仅颜色类属性，不影响布局/transform）。
+   首屏不会闪烁：主题在挂载前已通过 data-theme 应用，初始渲染即为目标值，
+   CSS 过渡只在属性“变化后”触发，故加载时无动画。 */
+*,
+*::before,
+*::after {
+  transition: background-color 0.2s ease, border-color 0.2s ease,
+    color 0.2s ease, box-shadow 0.2s ease;
+}
 
 html, body, #app { height: 100%; margin: 0; }
 
@@ -32,8 +177,8 @@ input {
   border-radius: 8px;
   font-size: 14px;
   color: var(--fg);
+  background: var(--surface);
   outline: none;
-  background: #fff;
 }
 
 input:focus { border-color: var(--accent); }

@@ -146,22 +146,22 @@ function fmtHistoryItem(it: unknown): string {
 .memory { flex: 1; min-height: 0; padding: 24px; max-width: 760px; margin: 0 auto; overflow-y: auto; width: 100%; }
 
 .layers { display: grid; gap: 12px; margin-bottom: 20px; }
-.layer { display: flex; gap: 12px; align-items: flex-start; background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.layer { display: flex; gap: 12px; align-items: flex-start; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
 .layer h4 { margin: 0 0 4px; font-size: 14px; color: var(--fg); }
 .layer p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--muted); }
 .dot { flex: none; width: 12px; height: 12px; border-radius: 50%; margin-top: 4px; }
-.dot.short { background: #0ea5e9; }
-.dot.session { background: var(--accent); }
-.dot.long { background: #0f766e; }
+.dot.short { background: var(--dot-short); }
+.dot.session { background: var(--dot-session); }
+.dot.long { background: var(--dot-long); }
 
-.card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
 .card h3 { margin: 0 0 14px; font-size: 15px; color: var(--fg); display: flex; align-items: center; gap: 8px; }
-.tag { font-size: 11px; font-weight: 400; color: var(--accent); background: #eef2ff; padding: 2px 8px; border-radius: 999px; }
+.tag { font-size: 11px; font-weight: 400; color: var(--accent); background: var(--chip-bg); padding: 2px 8px; border-radius: 999px; }
 
 .field { margin-bottom: 16px; }
 .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
-.chip { display: inline-flex; align-items: center; gap: 4px; background: #eef2ff; color: var(--accent); border: 1px solid #dbe3ff; padding: 5px 10px; border-radius: 999px; font-size: 13px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; background: var(--chip-bg); color: var(--chip-fg); border: 1px solid var(--chip-border); padding: 5px 10px; border-radius: 999px; font-size: 13px; }
 .chip .x { background: none; color: var(--accent); padding: 0 2px; font-size: 15px; line-height: 1; }
 .muted { color: var(--muted); font-size: 13px; }
 .add-row { display: flex; gap: 8px; }
@@ -170,14 +170,14 @@ function fmtHistoryItem(it: unknown): string {
 
 textarea { width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-family: inherit; font-size: 14px; color: var(--fg); }
 textarea:focus, input:focus { border-color: var(--accent); outline: none; }
-.ghost { background: #fff; color: var(--accent); border: 1px solid var(--line); padding: 0 14px; align-self: flex-start; }
+.ghost { background: var(--surface); color: var(--accent); border: 1px solid var(--line); padding: 0 14px; align-self: flex-start; }
 .ghost:disabled { opacity: 0.5; cursor: default; }
 
 .actions { display: flex; justify-content: flex-end; }
-.danger { background: #fff; color: var(--danger); border: 1px solid var(--danger); padding: 0 14px; height: 36px; }
+.danger { background: var(--surface); color: var(--danger); border: 1px solid var(--danger); padding: 0 14px; height: 36px; }
 .danger:disabled { opacity: 0.5; cursor: default; }
 
-.error { background: #fef2f2; color: var(--danger); border: 1px solid #fecaca; padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
+.error { background: var(--alert-err-bg); color: var(--danger); border: 1px solid var(--alert-err-border); padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
 .hint { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
 .hist { margin: 0; padding-left: 18px; color: var(--fg); font-size: 13px; line-height: 1.8; }
 

@@ -98,9 +98,9 @@ function fmtDate(iso: string | null): string {
 </template>
 
 <style scoped>
-.sidebar { width: 248px; flex: none; border-right: 1px solid var(--line); background: #fff; display: flex; flex-direction: column; height: 100%; }
+.sidebar { width: 248px; flex: none; border-right: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; height: 100%; }
 .new {
-  margin: 12px; background: var(--accent); color: #fff; padding: 10px; font-weight: 600;
+  margin: 12px; background: var(--accent); color: var(--accent-fg); padding: 10px; font-weight: 600;
 }
 .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px; }
 .empty.error { color: var(--danger); }
@@ -115,8 +115,8 @@ function fmtDate(iso: string | null): string {
 .item {
   padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent;
 }
-.item:hover { background: #f3f4f6; }
-.item.active { background: #eef2ff; border-color: #c7d2fe; }
+.item:hover { background: var(--surface-2); }
+.item.active { background: var(--item-active-bg); border-color: var(--item-active-border); }
 .item-main { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
 .title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .time { font-size: 11px; color: var(--muted); flex: none; }
@@ -133,7 +133,7 @@ function fmtDate(iso: string | null): string {
     position: absolute; top: 0; bottom: 0; left: 0; z-index: 50;
     width: 80%; max-width: 300px;
     transform: translateX(-100%); transition: transform 0.22s ease;
-    box-shadow: 2px 0 12px rgba(0, 0, 0, 0.12);
+    box-shadow: var(--shadow-lg);
   }
   .sidebar.open { transform: none; }
   .actions { visibility: visible; }

@@ -112,10 +112,10 @@ function imdbUrlFor(it: ChatItem): string | null {
 .avatar {
   flex: none; width: 30px; height: 30px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
-  font-size: 12px; color: #fff; background: var(--muted);
+  font-size: 12px; color: var(--accent-fg); background: var(--muted);
 }
 .msg.user .avatar { background: var(--accent); }
-.msg.assistant .avatar { background: #0f766e; }
+.msg.assistant .avatar { background: var(--assistant-avatar); }
 .bubble { flex: 1; min-width: 0; }
 .text { line-height: 1.7; font-size: 14px; }
 .text :deep(p) { margin: 0 0 10px; }
@@ -123,10 +123,10 @@ function imdbUrlFor(it: ChatItem): string | null {
 .text :deep(ul), .text :deep(ol) { margin: 8px 0; padding-left: 20px; }
 .text :deep(li) { margin: 4px 0; }
 .text :deep(code) {
-  background: #f3f4f6; padding: 2px 5px; border-radius: 4px; font-size: 13px; color: #c7254e;
+  background: var(--code-tag-bg); padding: 2px 5px; border-radius: 4px; font-size: 13px; color: var(--code-tag-fg);
 }
 .text :deep(pre) {
-  background: #f8f9fa; padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;
+  background: var(--code-bg); padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;
 }
 .text :deep(pre code) { background: transparent; padding: 0; color: inherit; }
 .streaming::after { content: ''; }
@@ -138,33 +138,33 @@ function imdbUrlFor(it: ChatItem): string | null {
 .toggle {
   background: none; color: var(--muted); font-size: 12px; padding: 2px 0;
 }
-.steps { list-style: none; margin: 6px 0 0; padding: 8px 10px; border-left: 2px solid var(--line); background: #fafafa; }
+.steps { list-style: none; margin: 6px 0 0; padding: 8px 10px; border-left: 2px solid var(--line); background: var(--surface-3); }
 .step { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .badge {
-  display: inline-block; background: #eef2ff; color: var(--accent);
+  display: inline-block; background: var(--chip-bg); color: var(--accent);
   border-radius: 4px; padding: 0 6px; font-size: 11px; margin-right: 6px;
 }
 .step-summary { color: var(--fg); }
-.step-ms { margin-left: 6px; color: #9ca3af; }
-.step-detail { margin-top: 2px; color: #6b7280; white-space: pre-wrap; }
+.step-ms { margin-left: 6px; color: var(--step-ms); }
+.step-detail { margin-top: 2px; color: var(--step-detail); white-space: pre-wrap; }
 .thinking {
-  margin: 6px 0 0; padding: 10px 12px; background: #faf8f0;
-  border-radius: 8px; font-size: 12px; color: #6b5b3a; white-space: pre-wrap;
+  margin: 6px 0 0; padding: 10px 12px; background: var(--think-bg);
+  border-radius: 8px; font-size: 12px; color: var(--think-fg); white-space: pre-wrap;
   max-height: 240px; overflow: auto; line-height: 1.6;
 }
 
 .items { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-top: 10px; }
-.item-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: #fff; }
+.item-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--surface); }
 .item-head { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; }
 .item-title { font-weight: 600; font-size: 14px; }
 .item-year { color: var(--muted); font-size: 12px; }
 .src { margin-left: auto; font-size: 11px; padding: 0 6px; border-radius: 4px; }
-.src.douban { background: #fff1e6; color: #c0501a; }
-.src.imdb { background: #eaf2ff; color: #1d4ed8; }
+.src.douban { background: var(--src-douban-bg); color: var(--src-douban-fg); }
+.src.imdb { background: var(--src-imdb-bg); color: var(--src-imdb-fg); }
 .item-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--muted); }
-.rating { color: #d97706; font-weight: 600; }
+.rating { color: var(--rating); font-weight: 600; }
 .muted { color: var(--muted); }
-.recall { margin-top: 4px; font-size: 11px; color: #9ca3af; }
+.recall { margin-top: 4px; font-size: 11px; color: var(--recall-fg); }
 .links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .ext {
   display: inline-flex; align-items: center; gap: 2px;
@@ -173,6 +173,6 @@ function imdbUrlFor(it: ChatItem): string | null {
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 .ext:hover { filter: brightness(0.97); }
-.ext.douban { background: #fff1e6; color: #c0501a; border-color: #f6d3b8; }
-.ext.imdb { background: #eaf2ff; color: #1d4ed8; border-color: #c7dbff; }
+.ext.douban { background: var(--src-douban-bg); color: var(--src-douban-fg); border-color: var(--src-douban-border); }
+.ext.imdb { background: var(--src-imdb-bg); color: var(--src-imdb-fg); border-color: var(--src-imdb-border); }
 </style>
