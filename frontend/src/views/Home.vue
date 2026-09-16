@@ -1,9 +1,37 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import { authUser, logout } from '../store/auth'
 import { currentView, setView, sidebarOpen, toggleSidebar, closeSidebar, theme, toggleTheme } from '../store/ui'
+import { exportSessionsZip } from '../api/export'
 import Sidebar from './Sidebar.vue'
 import ChatView from './ChatView.vue'
 import MemoryView from './MemoryView.vue'
+
+// —— 会话导出（仿 DeepSeek）：点击 -> 后端打包 zip -> 自动触发浏览器下载 ——
+const exporting = ref(false)
+const exportTip = ref('')
+let tipTimer: ReturnType<typeof setTimeout> | null = null
+
+async function onExport(): Promise<void> {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const r = await exportSessionsZip()
+    const kb = r.sizeBytes >= 1024 ? `${(r.sizeBytes / 1024).toFixed(1)} KB` : `${r.sizeBytes} B`
+    const n = r.sessionCount === null ? '' : `（${r.sessionCount} 个会话，${kb}）`
+    showTip(`已导出 ${r.filename} ${n}`)
+  } catch (e) {
+    showTip(e instanceof Error ? e.message : '导出失败，请重试')
+  } finally {
+    exporting.value = false
+  }
+}
+
+function showTip(msg: string): void {
+  exportTip.value = msg
+  if (tipTimer) clearTimeout(tipTimer)
+  tipTimer = setTimeout(() => (exportTip.value = ''), 4000)
+}
 </script>
 
 <template>
@@ -18,6 +46,23 @@ import MemoryView from './MemoryView.vue'
         <button :class="{ active: currentView === 'memory' }" @click="setView('memory')">记忆</button>
       </nav>
       <div class="user">
+        <transition name="tipfade">
+          <span v-if="exportTip" class="export-tip" role="status">{{ exportTip }}</span>
+        </transition>
+        <button
+          class="theme-toggle"
+          :disabled="exporting"
+          title="导出所有历史对话（zip）"
+          aria-label="导出所有历史对话"
+          @click="onExport"
+        >
+          <svg :class="['icon', { spinning: exporting }]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+        </button>
         <button
           class="theme-toggle"
           :title="theme === 'light' ? '切换到暗色模式' : '切换到明亮模式'"
@@ -76,7 +121,19 @@ import MemoryView from './MemoryView.vue'
   background: var(--surface-2); color: var(--fg); border-radius: 8px;
 }
 .theme-toggle:hover { background: var(--chip-bg); color: var(--accent); }
+.theme-toggle:disabled { opacity: 0.6; cursor: default; }
 .theme-toggle .icon { width: 18px; height: 18px; display: block; }
+.icon.spinning { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 导出结果提示：顶栏右侧浮出，数秒后自动消失 */
+.export-tip {
+  font-size: 12.5px; color: var(--accent); background: var(--chip-bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px;
+  max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tipfade-enter-active, .tipfade-leave-active { transition: opacity 0.25s ease, transform 0.25s ease; }
+.tipfade-enter-from, .tipfade-leave-to { opacity: 0; transform: translateY(-4px); }
 .body { flex: 1; min-height: 0; display: flex; overflow: hidden; position: relative; }
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 
