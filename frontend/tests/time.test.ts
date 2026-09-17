@@ -1,17 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { fmtConvTime } from '../src/utils/time'
 
-// 冻结系统时间，使「今天/昨天」判定确定性。
-describe('fmtConvTime', () => {
-  const NOW = new Date('2026-09-17T12:30:00')
-  beforeEach(() => {
-    vi.useFakeTimers()
-    vi.setSystemTime(NOW)
-  })
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
+// 绝对时间格式：YYYY-MM-DD HH:MM（本地时区）。
+describe('fmtConvTime (绝对时间)', () => {
   it('null / undefined / 空串 返回空串', () => {
     expect(fmtConvTime(null)).toBe('')
     expect(fmtConvTime(undefined)).toBe('')
@@ -22,24 +13,25 @@ describe('fmtConvTime', () => {
     expect(fmtConvTime('not-a-date')).toBe('')
   })
 
-  it('今天显示「今天 HH:MM」', () => {
-    expect(fmtConvTime('2026-09-17T08:05:00')).toBe('今天 08:05')
+  it('本地时间字符串按绝对格式输出', () => {
+    // 无 Z 后缀按本地时区解析，输出与输入日历一致
+    expect(fmtConvTime('2026-09-17T08:05:00')).toBe('2026-09-17 08:05')
   })
 
-  it('昨天显示「昨天 HH:MM」', () => {
-    expect(fmtConvTime('2026-09-16T23:59:00')).toBe('昨天 23:59')
+  it('今年其它日期同样绝对输出', () => {
+    expect(fmtConvTime('2026-03-05T09:00:00')).toBe('2026-03-05 09:00')
   })
 
-  it('今年显示「M月D日 HH:MM」', () => {
-    expect(fmtConvTime('2026-03-05T09:00:00')).toBe('3月5日 09:00')
+  it('往年同样绝对输出', () => {
+    expect(fmtConvTime('2025-12-31T20:00:00')).toBe('2025-12-31 20:00')
   })
 
-  it('往年显示「YYYY年M月D日 HH:MM」', () => {
-    expect(fmtConvTime('2025-12-31T20:00:00')).toBe('2025年12月31日 20:00')
+  it('补零：个位月/日/时/分均两位', () => {
+    expect(fmtConvTime('2026-01-02T03:04:00')).toBe('2026-01-02 03:04')
   })
 
-  it('接受 UTC ISO（Z）并按时区本地化解析为今天', () => {
-    const d = new Date(NOW.getTime() - 3600_000)
-    expect(fmtConvTime(d.toISOString())).toMatch(/^今天 \d{2}:\d{2}$/)
+  it('接受 UTC ISO（Z）并按时区本地化解析', () => {
+    // 仅校验形状 YYYY-MM-DD HH:MM，不依赖具体时区偏移
+    expect(fmtConvTime('2026-09-17T00:05:00Z')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
   })
 })

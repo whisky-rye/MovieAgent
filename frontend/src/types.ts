@@ -40,6 +40,7 @@ export interface PosterInfo {
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  created_at?: string // 子对话时间戳（ISO，UTC）；后端 append_message 落库即补戳，前端 pushMessage 本地预置
   items?: ChatItem[]
   steps?: ChatStep[]
   thinking?: string

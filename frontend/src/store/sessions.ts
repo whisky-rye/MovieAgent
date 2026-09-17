@@ -55,6 +55,7 @@ function mapMessages(msgs: unknown[]): ChatMessage[] {
     return {
       role: (msg.role as 'user' | 'assistant') ?? 'user',
       content: (msg.content as string) ?? '',
+      created_at: (msg.created_at as string) ?? undefined,
       items: (msg.items as ChatMessage['items']) ?? undefined,
       steps: (msg.steps as ChatMessage['steps']) ?? undefined,
       thinking: normalizeThinking(msg.thinking),
@@ -202,6 +203,8 @@ export async function deleteSession(sid: string): Promise<void> {
 
 // 本地追加一条消息（发送/接收时用，避免每次都打接口）
 export function pushMessage(msg: ChatMessage): void {
+  // 预置本地时间戳，保证当前会话无需刷新即可显示子对话时间（落库后由后端用服务端时间覆盖）。
+  if (!msg.created_at) msg.created_at = new Date().toISOString()
   state.messages.push(msg)
 }
 

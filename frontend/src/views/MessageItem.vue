@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { renderMarkdown } from '../utils/md'
 import { doubanUrl, imdbUrl } from '../utils/extlinks'
+import { fmtConvTime } from '../utils/time'
 import type { ChatItem, ChatMessage, ChatStep } from '../types'
 
 defineProps<{ message: ChatMessage }>()
@@ -113,6 +114,9 @@ function imdbUrlFor(it: ChatItem): string | null {
           <video v-else :src="message.poster.url" controls class="poster-img"></video>
           <a class="poster-dl" :href="message.poster.download_url" download>下载海报 ↓</a>
         </div>
+
+        <!-- 子对话时间：该条消息的创建时间（绝对格式） -->
+        <div v-if="message.created_at" class="msg-time">{{ fmtConvTime(message.created_at) }}</div>
       </template>
     </div>
   </div>
@@ -203,4 +207,8 @@ function imdbUrlFor(it: ChatItem): string | null {
   padding: 6px 12px; border-radius: 8px;
 }
 .poster-dl:hover { filter: brightness(0.95); }
+.msg-time {
+  margin-top: 6px; font-size: 11px; color: var(--muted); letter-spacing: 0.2px;
+}
+.msg.user .msg-time { text-align: right; }
 </style>
