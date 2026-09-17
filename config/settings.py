@@ -19,8 +19,11 @@ class Settings(BaseSettings):
     # host / 账号 / 密码 直接复用上方 IMDB_MYSQL_*（同一 MySQL 实例，仅库名不同）
     MOVIE_AGENT_MYSQL_DB: str = "movie_agent"
 
-    # ---- 前端跨域（G2）：允许的前端源，逗号分隔 ----
+    # ---- 前端跨域（G2/O7）：允许的前端源（白名单），逗号分隔 ----
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # 生产收紧：仅暴露业务所需的最小方法/头集合（替代原先的 "*"）
+    CORS_ALLOW_METHODS: str = "GET,POST,OPTIONS"
+    CORS_ALLOW_HEADERS: str = "Content-Type,Authorization,X-CSRF-Token,X-Requested-With"
 
     # ---- 会话存储（G3）：强 MySQL——sessions 表落 movie_agent 库；连不上/表缺失则服务拒绝启动（无 file 兜底） ----
     SESSION_MAX_MESSAGES: int = 200            # 单会话消息上限（超出截断最旧，防无限膨胀）
@@ -210,6 +213,13 @@ class Settings(BaseSettings):
 
     # 海报落盘目录（相对项目根）；静态下载经 /poster/download/{session_id} 路由，无需挂载 StaticFiles
     POSTER_DATA_DIR: str = "data/poster"
+
+    # ---- 语义缓存（O8：近义 query 命中同一份缓存） ----
+    # 复用向量库建独立集合存 query 嵌入，新请求算嵌入后 ANN 检索，相似度≥阈值即命中。
+    # embed 失败自动降级为「仅精确匹配」（不阻断主链路）。
+    SEMANTIC_CACHE_ENABLED: bool = True
+    SEMANTIC_CACHE_THRESHOLD: float = 0.92   # 余弦相似度阈值：≥ 此值视为同义，复用候选
+    QUERY_CACHE_COLLECTION: str = "query_cache"
     # 生成失败/无 Key/无网络时是否自动降级为占位图（PIL 生成，便于断网演示）；默认 False（仅记日志、前端不显示海报块）
     POSTER_FALLBACK_PLACEHOLDER: bool = False
     # 异步任务轮询上限（秒）与轮询间隔（秒）

@@ -77,6 +77,10 @@ def get_session(session_id: str, auth: CurrentUser = Depends(get_current_user)):
     for msg in rec.get("messages") or []:
         if isinstance(msg, dict) and msg.get("items"):
             backfill_item_ids(msg["items"])
+        # 历史遗留消息可能缺 created_at：按会话 updated_at（已是 ISO 字符串）兜底，
+        # 保证加载出的旧会话每条子对话也能显示时间，不出现空白。
+        if isinstance(msg, dict) and not msg.get("created_at"):
+            msg["created_at"] = rec.get("updated_at") or rec.get("created_at")
     return _decorate_share(rec)
 
 

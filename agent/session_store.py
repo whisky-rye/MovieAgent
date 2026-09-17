@@ -137,7 +137,11 @@ class MySQLSessionStore:
             if r is None:
                 return
             msgs = self._msgs(r["messages"])
-            msgs.append(msg)
+            # 每条消息落库即带 created_at（服务端 UTC），供前端按"子对话"展示时间；
+            # 调用方已带则保留（如前端 pushMessage 预置的本地时间），否则补戳。
+            stored = dict(msg)
+            stored["created_at"] = stored.get("created_at") or _now_iso()
+            msgs.append(stored)
             title = r["title"]
             # 自动命名：首条用户消息且仍为默认标题
             if msg.get("role") == "user" and title == "新会话":

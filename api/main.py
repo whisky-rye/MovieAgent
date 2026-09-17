@@ -32,6 +32,7 @@ from api.routes.export import router as export_router  # 会话历史导出（zi
 from api.routes.share import router as share_router  # G-Share：会话共享 / 公开只读查看
 from api.routes.poster import router as poster_router  # G-Poster：Top3 宣传海报查询/下载
 from api.deps import get_current_user, CurrentUser  # G1：鉴权依赖（注入 user_id）
+from api.cors import cors_enforce  # O7/E5：CORS 生产白名单硬拦截
 from agent.session_store import get_session_store  # G3：会话落库
 from pydantic import BaseModel, Field
 
@@ -41,6 +42,8 @@ from agent.graph import build_agent
 from agent.history_compress import build_history_context
 from retrieval.candidates import Candidate
 from api.cache import get_cache, cache_key
+from api.semcache import get_sem_cache  # O8：语义缓存（近义 query 命中）
+from agent.rag import generate_explanation  # O8：近义命中时仅复用候选、重生成解说
 from api.ratelimit import get_limiter, RateLimited
 from agent.memory import get_memory_store
 from agent.guardrail import check_guardrail
@@ -96,11 +99,14 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=[m.strip() for m in settings.CORS_ALLOW_METHODS.split(",") if m.strip()],
+    allow_headers=[h.strip() for h in settings.CORS_ALLOW_HEADERS.split(",") if h.strip()],
     # 导出接口：允许前端跨域读取附件名与导出统计
     expose_headers=["Content-Disposition", "X-Export-Sessions"],
 )
+
+# O7/E5：生产环境显式拒绝白名单外的跨域来源（仅 production 生效，见 api/cors.py）
+app.middleware("http")(cors_enforce)
 
 
 @app.middleware("http")
@@ -251,6 +257,59 @@ def _candidate_to_dict(c: Candidate) -> dict:
     }
 
 
+def _dict_to_candidate(d: dict) -> Candidate:
+    """可序列化 dict -> Candidate（语义缓存近义命中后复用候选、重生成解说用）。"""
+    return Candidate(
+        id=d.get("id", ""),
+        source=d.get("source", ""),
+        title=d.get("title", ""),
+        year=int(d.get("year") or 0),
+        genres=list(d.get("genres") or []),
+        country=d.get("country") or "",
+        rating=float(d.get("rating") or 0.0),
+        rating_count=int(d.get("rating_count") or 0),
+        doc="",  # 复用候选只需元数据，doc 不影响解说生成
+        recall_source=d.get("recall_source") or "",
+        score=float(d.get("score") or 0.0),
+        douban_id=d.get("douban_id") or "",
+        imdb_id=d.get("imdb_id") or "",
+    )
+
+
+def _build_recommend_resp(
+    req: "RecommendReq",
+    items: list,
+    answer: str,
+    intent: str,
+    sources: dict,
+    steps: list,
+    thinking: dict,
+    cached: bool,
+    semantic: bool,
+    request_id: str,
+    elapsed_ms: int,
+) -> dict:
+    """组装 /recommend 统一响应体（精确/语义/实时三路共用，避免重复构造）。"""
+    cache = get_cache()
+    return {
+        "query": req.query,
+        "user_id": req.user_id,
+        "request_id": request_id,
+        "intent": intent,
+        "answer": answer,
+        "count": len(items),
+        "items": items,
+        "sources": sources,
+        "steps": steps,
+        "thinking": thinking,
+        "elapsed_ms": elapsed_ms,
+        "cached": cached,
+        "semantic": semantic,
+        "cache_backend": cache.backend(),
+        "guardrail": {"action": "allow", "category": "ok", "reason": ""},
+    }
+
+
 def _build_history(session_id: Optional[str]) -> str:
     """按 session_id 取出当前轮之前的会话消息，压缩为上下文串（多轮连贯 + 省 token）。
 
@@ -369,13 +428,14 @@ def recommend(
     request: Request,
     auth: CurrentUser = Depends(get_current_user),
 ):
-    # P4.2：缓存优先（Redis / 进程内兜底），命中直接返回
+    # P4.2 + O8：缓存优先（精确 / 语义近义），命中直接返回
     cache = get_cache()
     ck = cache_key(req.query, auth.user_id, str(req.top_k))
     hit = cache.get(ck)
     if hit is not None:
         out = dict(hit)
         out["cached"] = True
+        out["semantic"] = bool(out.get("semantic", False))
         out["cache_backend"] = cache.backend()
         logger_api.info(
             "recommend 缓存命中", extra={"event": "recommend", "user_id": auth.user_id,
@@ -384,6 +444,55 @@ def recommend(
             "count": out.get("count")},
         )
         return out
+
+    # O8：语义近义命中——复用候选列表，按新 query 重生成解说（用户确认「仅复用候选 items」）
+    sem = get_sem_cache().match(req.query, auth.user_id, req.top_k)
+    if sem is not None:
+        cached_items = (sem["value"].get("items") or [])[: req.top_k]
+        if sem["exact"]:
+            out = dict(sem["value"])
+            out["cached"] = True
+            out["semantic"] = False
+            out["cache_backend"] = cache.backend()
+            logger_api.info(
+                "recommend 语义命中(精确等价)", extra={"event": "recommend", "user_id": auth.user_id,
+                "request_id": request.state.request_id, "cached": True, "semantic": False,
+                "cache_backend": cache.backend(), "intent": out.get("intent"),
+                "count": out.get("count")},
+            )
+            return out
+        # 近义：复用候选，重跑 LLM 生成与新 query 一致的解说
+        try:
+            prefs = get_memory_store().get_prefs(auth.user_id)
+        except Exception:  # noqa: BLE001 - 偏好缺失不影响复用候选
+            prefs = {}
+        cands = [_dict_to_candidate(d) for d in cached_items]
+        try:
+            answer = generate_explanation(
+                req.query, cands, prefs, auth.user_id, request.state.request_id
+            )
+        except Exception as e:  # noqa: BLE001 - 解说重生成失败则退回整包缓存
+            logger_api.warning("语义命中重生成解说失败，退回候选整包: %s", e)
+            out = dict(sem["value"])
+            out["cached"] = True
+            out["semantic"] = False
+            out["cache_backend"] = cache.backend()
+            return out
+        resp = _build_recommend_resp(
+            req, cached_items, answer, sem["value"].get("intent", ""),
+            sem["value"].get("sources", {}), sem["value"].get("steps", []),
+            sem["value"].get("thinking", {}), True, True,
+            request.state.request_id, 0,
+        )
+        # 把本次 (query, 重生成结果) 落精确缓存 + 索引，后续同 query 直接精确命中
+        cache.set(ck, resp)
+        get_sem_cache().index_query(req.query, auth.user_id, req.top_k, resp)
+        logger_api.info(
+            "recommend 语义命中(近义复用候选)", extra={"event": "recommend", "user_id": auth.user_id,
+            "request_id": request.state.request_id, "cached": True, "semantic": True,
+            "cache_backend": cache.backend(), "intent": resp["intent"], "count": len(cached_items)},
+        )
+        return resp
 
     request_id = request.state.request_id
     t0 = time.time()
@@ -408,22 +517,11 @@ def recommend(
         )
         raise HTTPException(status_code=500, detail=f"推荐失败: {e}")
     items = state["items"][: req.top_k]
-    resp = {
-        "query": req.query,
-        "user_id": auth.user_id,
-        "request_id": request_id,
-        "intent": state["intent"],
-        "answer": state["answer"],
-        "count": len(items),
-        "items": items,
-        "sources": state.get("sources", {}),
-        "steps": state.get("steps", []),
-        "thinking": state.get("thinking", {}),
-        "elapsed_ms": int((time.time() - t0) * 1000),
-        "cached": False,
-        "cache_backend": cache.backend(),
-        "guardrail": state.get("guardrail", {"action": "allow", "category": "ok", "reason": ""}),
-    }
+    resp = _build_recommend_resp(
+        req, items, state["answer"], state["intent"],
+        state.get("sources", {}), state.get("steps", []), state.get("thinking", {}),
+        False, False, request_id, int((time.time() - t0) * 1000),
+    )
     logger_api.info(
         "recommend 完成", extra={"event": "recommend", "user_id": auth.user_id,
         "request_id": request_id, "cached": False, "cache_backend": cache.backend(),
@@ -432,6 +530,7 @@ def recommend(
         "guardrail_action": resp["guardrail"]["action"]},
     )
     cache.set(ck, resp)
+    get_sem_cache().index_query(req.query, auth.user_id, req.top_k, resp)
     return resp
 
 

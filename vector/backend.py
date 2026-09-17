@@ -325,12 +325,17 @@ class MilvusBackend(VectorBackend):
         return out
 
 
-def get_vector_backend() -> VectorBackend:
-    """工厂：按 settings.VECTOR_BACKEND 选择实现（配置切换，业务零改动）。"""
+def get_vector_backend(collection: str | None = None) -> VectorBackend:
+    """工厂：按 settings.VECTOR_BACKEND 选择实现（配置切换，业务零改动）。
+
+    collection 省略时走 default_collection()（影片语料集合）；传入自定义集合名
+    可复用同一底层存储承载其它索引（如语义缓存的 query_cache 集合）。
+    """
+    name = collection or default_collection()
     if settings.VECTOR_BACKEND == "chroma":
-        return ChromaBackend()
+        return ChromaBackend(collection=name)
     if settings.VECTOR_BACKEND == "qdrant":
-        return QdrantBackend()
+        return QdrantBackend(collection=name)
     if settings.VECTOR_BACKEND == "milvus":
-        return MilvusBackend()
+        return MilvusBackend(collection=name)
     raise ValueError(f"未知 VECTOR_BACKEND: {settings.VECTOR_BACKEND}")
