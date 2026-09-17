@@ -10,7 +10,7 @@
 消息落库不暴露独立接口——由 /recommend/stream 的 done 事件后内部调用 SessionStore.append_message，
 保证「对话即落库」且前后端单一写入点，避免双写不一致。
 
-底层复用 agent.session_store.get_session_store()（MySQL 优先 + file 兜底）。
+底层复用 agent.session_store.get_session_store()（强 MySQL，不可用则服务拒绝启动，无 file 兜底）。
 """
 from __future__ import annotations
 

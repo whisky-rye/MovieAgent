@@ -477,7 +477,7 @@ def _sse(event: str, data: dict) -> str:
 def _persist_session(session_id: str, user_id: str, query: str, done_payload: dict) -> None:
     """G3 落库：把本轮 (user, assistant) 消息写入会话（带归属校验）。
 
-    失败仅记 warning，绝不阻塞已返回的流式结果；MySQL 不可达时 SessionStore 自动回退 file。
+    失败仅记 warning，绝不阻塞已返回的流式结果；存储为强 MySQL，异常会在此显式告警（无 file 兜底）。
     """
     try:
         store = get_session_store()

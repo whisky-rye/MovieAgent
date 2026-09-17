@@ -22,12 +22,10 @@ class Settings(BaseSettings):
     # ---- 前端跨域（G2）：允许的前端源，逗号分隔 ----
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
 
-    # ---- 会话存储（G3）：新会话表统一落 movie_agent 库，连不上回退 file ----
-    SESSION_FILE_ROOT: str = "data/sessions"   # file 兜底根目录
+    # ---- 会话存储（G3）：强 MySQL——sessions 表落 movie_agent 库；连不上/表缺失则服务拒绝启动（无 file 兜底） ----
     SESSION_MAX_MESSAGES: int = 200            # 单会话消息上限（超出截断最旧，防无限膨胀）
 
-    # ---- 会话共享（公开只读查看 /share/{token}）：shared_sessions 表落 movie_agent，连不上回退 file ----
-    SHARED_FILE_ROOT: str = "data/shared"      # 共享映射 file 兜底根目录（session_id -> token）
+    # ---- 会话共享（公开只读查看 /share/{token}）：shared_sessions 表落 movie_agent，强 MySQL、无 file 兜底 ----
     # 共享链接对外域名前缀：复制出去的链接 = {APP_PUBLIC_ORIGIN}/share/{token}，外部访客直接打开即可。
     # 部署时改成前端实际对外地址（如 https://movie.example.com）；留空则回退 VITE_API_BASE 同源前端。
     APP_PUBLIC_ORIGIN: str = "http://localhost:5173"
@@ -39,7 +37,6 @@ class Settings(BaseSettings):
     AUTH_SECRET: str = ""                       # HMAC 签名密钥（必填；生产走 Secret/Vault，本地 .env，不入仓）
     AUTH_TOKEN_TTL: int = 604800                # token 有效期（秒），默认 7 天
     AUTH_PBKDF2_ITERATIONS: int = 100000        # 密码哈希迭代次数
-    AUTH_FILE_ROOT: str = "data/users"          # UserStore 的 file 兜底根目录
     # ---- 鉴权 Cookie / CSRF（Token→httpOnly Cookie 方案） ----
     AUTH_COOKIE_NAME: str = "ma_token"          # 鉴权 Cookie（HttpOnly，不可被 JS 读取，防 XSS 窃取）
     AUTH_COOKIE_SAMESITE: str = "lax"           # lax：允许同站跨端口（前端 5173 ↔ 后端 8000）携带
@@ -126,9 +123,8 @@ class Settings(BaseSettings):
     LANGSMITH_PROJECT: str = "movie_agent"
     LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
 
-    # ---- 偏好记忆后端（file / redis / fallback；fallback = Redis 优先 + file 兜底） ----
-    MEMORY_BACKEND: str = "file"    # fallback（默认）| redis | file
-    MEMORY_FILE_ROOT: str = "data/memory"
+    # ---- 偏好记忆后端：强 MySQL（落 movie_agent.user_preferences 表，无 file / redis / fallback 兜底） ----
+    # 业务代码（agent/memory.py）强制走 MySQLMemoryStore，MySQL 不可达则服务拒绝启动。
 
     # ---- 日志（精细化可观测：JSON 行 + 滚动文件 + 专用云端 API 调用日志） ----
     LOG_DIR: str = "log"                # 运行期日志目录（.gitignore 已忽略）

@@ -2,7 +2,7 @@
 import { ref, nextTick, onBeforeUnmount, watch, computed } from 'vue'
 import MessageItem from './MessageItem.vue'
 import { streamRecommend } from '../api/stream'
-import { fetchPoster } from '../api/client'
+import { fetchPoster, API_BASE } from '../api/client'
 import suggestionsData from '../data/suggestions.json'
 import {
   currentSessionId, currentMessages, sessionsLoading, newSession, pushMessage,
@@ -275,6 +275,28 @@ function retryLast() {
 // 用自增 token 防止重叠对话时把旧轮询错误地挂到新消息上；新对话开始即作废旧轮询。
 let posterPollToken = 0
 let posterTimer: ReturnType<typeof setTimeout> | null = null
+
+// 后端返回的海报 url/download_url 是 host 相对路径（如 /poster/download/{sid}）。
+// 开发环境前端跑在 :5173、后端在 :8000，若直接作为 <img src>/<a href> 会被解析到 Vite(5173)，
+// 拿到的是 SPA 的 HTML 而非图片——既导致预览裂图、又导致"下载到格式异常的文件"。
+// 因此一律拼上 API_BASE，确保指向真实后端。
+function absUrl(p?: string): string | undefined {
+  if (!p) return p
+  if (/^https?:\/\//i.test(p)) return p
+  return API_BASE + p
+}
+
+function applyPoster(m: ChatMessage, st: { url?: string; download_url?: string; model?: string; model_family?: 'image' | 'video'; media_type?: string; placeholder?: boolean }) {
+  m.poster = {
+    url: absUrl(st.url) ?? '',
+    download_url: absUrl(st.download_url) ?? '',
+    model: st.model ?? '',
+    model_family: st.model_family ?? 'image',
+    media_type: st.media_type,
+    placeholder: st.placeholder,
+  }
+}
+
 function pollPoster(sid: string, maxAttempts = 90) {
   const token = ++posterPollToken
   let attempts = 0
@@ -283,19 +305,12 @@ function pollPoster(sid: string, maxAttempts = 90) {
     try {
       const st = await fetchPoster(sid)
       if (st.status === 'ready' && st.url) {
-        updateLastAssistant((m) => {
-          m.poster = {
-            url: st.url!,
-            download_url: st.download_url!,
-            model: st.model ?? '',
-            model_family: st.model_family ?? 'image',
-            media_type: st.media_type,
-            placeholder: st.placeholder,
-          }
-        })
+        updateLastAssistant((m) => applyPoster(m, st))
         return
       }
-      if (st.status === 'error') return
+      // 仅 pending（生成进行中）继续轮询；none（从未生成）/ error 均为终态，立即停止，
+      // 避免对不存在的海报空转 3 分钟（与 store/sessions.ts restorePoster 同规则）。
+      if (st.status !== 'pending') return
     } catch {
       // 网络抖动：继续轮询
     }

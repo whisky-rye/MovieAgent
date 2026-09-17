@@ -9,7 +9,7 @@
 - 全程内存（io.BytesIO + zipfile），不落临时文件、无清理负担；zip 内固定单文件 conversations.json，
   UTF-8 ensure_ascii=False，中文原文可读。
 - GET 请求：CSRF 中间件天然豁免；鉴权走 httpOnly Cookie（浏览器）或 Bearer（API 客户端）均可。
-- 会话很多时也是一次 list + N 次 get 的 O(N) 读，store 层自带 MySQL->file 兜底。
+- 会话很多时也是一次 list + N 次 get 的 O(N) 读；store 为强 MySQL（无 file 兜底）。
 """
 from __future__ import annotations
 

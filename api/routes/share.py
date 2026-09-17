@@ -11,7 +11,7 @@
    （secrets.token_hex），且响应体绝不回传 owner_user_id，外部访客无法反推作者、也无法枚举他人会话。
 3. 取消共享即删除令牌，原链接立即 404；一个会话至多一个有效令牌（create 幂等覆盖旧令牌）。
 
-底层复用 agent.share_store.get_share_store()（MySQL 优先 + file 兜底）与 session_store（校验归属）。
+底层复用 agent.share_store.get_share_store()（强 MySQL，无 file 兜底）与 session_store（校验归属）。
 """
 from __future__ import annotations
 

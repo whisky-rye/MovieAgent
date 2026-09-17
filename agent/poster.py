@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 from typing import Any, Optional
@@ -151,7 +152,7 @@ class BaiLianVisualClient:
         return self.base_url + f"/tasks/{task_id}"
 
     # —— 调用 ——
-    def generate(self, model: str, prompt: str) -> dict:
+    def generate(self, model: str, prompt: str, session_id: str | None = None) -> dict:
         """调用百炼视觉模型，返回结果 dict（含落盘 file_path / media_type / token 用量等）。"""
         family = _model_family(model)
         t0 = time.time()
@@ -159,6 +160,7 @@ class BaiLianVisualClient:
             "model": model,
             "model_family": family,
             "prompt": prompt,
+            "session_id": session_id,
             "input_tokens": 0,
             "output_tokens": 0,
             "latency_ms": 0,
@@ -211,7 +213,7 @@ class BaiLianVisualClient:
                 result_url = self._poll_task(task_id, family)
 
             out["poster_url_public"] = result_url
-            out["file_path"] = self._download(result_url, out)
+            out["file_path"] = self._download(result_url, out, session_id)
         except Exception as e:  # 任意失败：记录但不上抛，交由调度层标 error
             out["error"] = f"{type(e).__name__}: {e}"
             logger.warning("海报生成异常 model=%s: %s", model, out["error"])
@@ -300,8 +302,13 @@ class BaiLianVisualClient:
         else:
             out["_ext"] = "png" if out.get("model_family") == "image" else "mp4"
 
-    def _download(self, url: str, out: dict) -> str:
-        """把百炼返回的临时 URL 下载到本地落盘，返回本地路径（扩展名按实际 content-type 选）。"""
+    def _download(self, url: str, out: dict, session_id: str | None = None) -> str:
+        """把百炼返回的临时 URL 下载到本地落盘，返回本地路径。
+
+        文件名确定性地按 session_id 命名（{sid}.{ext}），保证 manifest.file 与磁盘始终一致，
+        避免旧实现用时间戳命名时 manifest 指向已被清理文件、下载路由 404 把 HTML 当图片存的缺陷。
+        无 session_id（兜底调用）时回退时间戳命名。
+        """
         os.makedirs(settings.POSTER_DATA_DIR, exist_ok=True)
         resp = requests.get(url, timeout=self.timeout * 2, stream=True)
         resp.raise_for_status()
@@ -310,7 +317,17 @@ class BaiLianVisualClient:
             out["media_type"] = ct
         self._apply_media_type(out)
         ext = out.pop("_ext", "png")
-        dest = os.path.join(settings.POSTER_DATA_DIR, f"{int(time.time()*1000)}.{ext}")
+        if session_id:
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(session_id))[:120]
+            dest = os.path.join(settings.POSTER_DATA_DIR, f"{safe}.{ext}")
+            # 同名先删，避免覆盖时的残留/锁问题
+            if os.path.isfile(dest):
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+        else:
+            dest = os.path.join(settings.POSTER_DATA_DIR, f"{int(time.time()*1000)}.{ext}")
         with open(dest, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 if chunk:
@@ -344,8 +361,10 @@ class BaiLianVisualClient:
 
 
 # —— 状态持久化（manifest）——
+# 注意：manifest 每次都从磁盘读取，不使用进程内长期缓存。原因：
+# schedule_poster 在后台线程写盘，而多 worker(uvicorn --workers N) 时各 worker 进程独立，
+# 若缓存则其它 worker 的轮询请求读不到新海报 → 404。manifest 体积极小，每次读盘开销可忽略。
 _manifest_lock = threading.Lock()
-_manifest_cache: dict[str, Any] = {}
 
 
 def _manifest_path() -> str:
@@ -353,25 +372,18 @@ def _manifest_path() -> str:
 
 
 def _load_manifest() -> dict:
-    global _manifest_cache
     with _manifest_lock:
-        if _manifest_cache:
-            return _manifest_cache
         p = _manifest_path()
         if os.path.isfile(p):
             try:
-                _manifest_cache = json.load(open(p, encoding="utf-8"))
+                return json.load(open(p, encoding="utf-8"))
             except Exception:
-                _manifest_cache = {}
-        else:
-            _manifest_cache = {}
-        return _manifest_cache
+                return {}
+        return {}
 
 
 def _save_manifest(m: dict) -> None:
-    global _manifest_cache
     with _manifest_lock:
-        _manifest_cache = m
         os.makedirs(settings.POSTER_DATA_DIR, exist_ok=True)
         json.dump(m, open(_manifest_path(), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
@@ -435,7 +447,7 @@ def schedule_poster(
             prompt = build_prompt(top3, prefs, query)
             model = pick_model()
             client = BaiLianVisualClient()
-            res = client.generate(model, prompt)
+            res = client.generate(model, prompt, session_id)
 
             if res.get("file_path"):
                 rel = os.path.basename(res["file_path"])

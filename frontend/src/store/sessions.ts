@@ -2,7 +2,7 @@
 // 负责：会话列表、当前会话、消息历史、增删改查；与后端 /sessions 对接。
 
 import { reactive, computed } from 'vue'
-import { apiFetch } from '../api/client'
+import { apiFetch, fetchPoster, API_BASE, type PosterStatus } from '../api/client'
 import { shareSession as apiShare, unshareSession as apiUnshare } from '../api/share'
 import type { ChatMessage, SessionSummary } from '../types'
 
@@ -121,6 +121,49 @@ export async function selectSession(sid: string): Promise<void> {
     state.messages = []
   } finally {
     state.loading = false
+  }
+  // G-Poster：刷新/切换会话后，重新恢复该会话已生成的海报（manifest 持久化在后端，刷新不丢失）。
+  // 注意：不 await——海报恢复最多轮询数十秒，若阻塞在此会让「正在加载会话…」长时间转圈（踩过坑）。
+  restorePoster(sid)
+}
+
+// G-Poster：把后端 manifest 中已就绪的海报回填到「最后一条助手消息」，使刷新/切换后海报持续显示。
+// 后端返回的是 host 相对路径，需拼上 API_BASE 才能指向真实后端（否则开发环境会去 Vite :5173 取 SPA HTML）。
+// 用自增 token 防竞态：快速切换会话时，旧会话的迟回包不得挂到新会话的消息上。
+let posterRestoreToken = 0
+async function restorePoster(sid: string): Promise<void> {
+  const token = ++posterRestoreToken
+  const abs = (p?: string) => (!p ? p : /^https?:\/\//i.test(p) ? p : API_BASE + p)
+  // 仅在「pending」（生成进行中）时轮询等待；ready 直接回填；
+  // none（从未生成/manifest 被清）/ error（生成失败）都是终态，立即返回——
+  // 绝不能对未知状态死轮询（曾导致会话加载卡 60s，见 2026-09-17 修复）。
+  let st: PosterStatus | null = null
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try {
+      st = await fetchPoster(sid)
+    } catch {
+      return
+    }
+    if (st.status === 'ready') break
+    if (st.status !== 'pending') return
+    if (token !== posterRestoreToken) return // 已切换到其他会话，放弃本次恢复
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  if (!st || st.status !== 'ready' || !st.url) return
+  if (token !== posterRestoreToken || state.currentId !== sid) return
+  const msgs = state.messages
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'assistant') {
+      msgs[i].poster = {
+        url: abs(st.url) ?? '',
+        download_url: abs(st.download_url) ?? '',
+        model: st.model ?? '',
+        model_family: st.model_family ?? 'image',
+        media_type: st.media_type,
+        placeholder: st.placeholder,
+      }
+      break
+    }
   }
 }
 

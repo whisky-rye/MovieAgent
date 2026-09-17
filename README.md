@@ -168,12 +168,11 @@ curl -N -X POST http://127.0.0.1:8000/recommend/stream \
 
 ---
 
-## 5.1 偏好记忆后端（Redis 优先 + file 兜底）
-`agent/memory.py` 的 `FallbackMemoryStore` 与 `DualCache` 同思路：**Redis 优先，不可达时自动回退本地文件 JSON（`data/memory/{user_id}.json`）**，绝不阻塞主推荐链路。
-- 后端三选一，由 `MEMORY_BACKEND` 控制：`fallback`（默认，Redis 优先 + file 兜底）/`redis`（仅 Redis）/`file`（仅文件，纯离线）。
-- 启动 `ping` 探测 Redis；连不上 → `backend=file` 全程走文件。每次 `load/save` 若 Redis 抛异常，自动回退文件。
-- `load` 在 Redis 返回空（新用户/迁移期）时额外回退文件，**兼容此前 file 存量数据**（如 `alice`/`demo`），切换后端不丢历史偏好。
-- Redis 以 `mem:{user_id}` 为 key 持久化整份 JSON（无 TTL，长存）；连接方式复用 `REDIS_*`，同样 `protocol=2` 兼容老版本。
+## 5.1 偏好记忆后端（强 MySQL，无 file 兜底）
+`agent/memory.py` 的 `MySQLMemoryStore` 落 `movie_agent.user_preferences` 表（与 `MySQLSessionStore` / `MySQLShareStore` / `MySQLUserStore` 同规则）：
+- **强 MySQL 单一后端**：构造时探测 `user_preferences` 表，不可达 / 表缺失则 `RuntimeError` fail-fast，服务拒绝启动；运行期异常直接向上抛（接口层转 500），绝不静默降级到文件 / Redis。
+- 单一 JSON 列 `data` 存整份 `{user_id, preferences, history}`，与 Agent（`graph.py` / `tools.py` 的 `remember_preference`）及前端 `/memory` 接口共用同一张表 = 真正的单一数据源。
+- 该表由 `scripts/init_movie_agent_db.py` 一次性初始化（DDL 见 `db/schema/movie_agent.sql`）。
 
 ---
 
@@ -261,9 +260,7 @@ REDIS_PORT=6379
 REDIS_DB=0
 REDIS_PASSWORD=
 REDIS_TTL=300
-# 偏好记忆后端（fallback=Redis 优先 + file 兜底；redis 不可达自动走 file）
-MEMORY_BACKEND=fallback
-MEMORY_FILE_ROOT=data/memory
+# 偏好记忆后端：强 MySQL（落 movie_agent.user_preferences 表）；MySQL 不可达则服务拒绝启动，无 file 兜底
 # 日志（精细化可观测；见 5.2 节）
 LOG_DIR=log
 LOG_LEVEL=INFO

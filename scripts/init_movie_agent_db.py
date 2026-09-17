@@ -8,8 +8,9 @@
     2. 切到 movie_agent，执行 db/schema/movie_agent.sql 内的全部 DDL。
 
 说明：
-    本脚本仅供本地 / 部署初始化使用；业务代码（agent/memory.py、agent/session_store.py）
-    严禁包含任何建库建表语句，只做读写探测 + file 兜底。可重复执行（DDL 幂等）。
+    本脚本仅供本地 / 部署初始化使用；业务代码（agent/memory.py、agent/session_store.py、
+    agent/user_store.py、agent/share_store.py）严禁包含任何建库建表语句，只做读写探测，
+    异常则强 MySQL fail-fast（服务拒绝启动，无 file 兜底）。可重复执行（DDL 幂等）。
 """
 import os
 import sys
