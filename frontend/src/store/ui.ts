@@ -3,6 +3,7 @@
 // 以及移动端侧边栏抽屉的开关。
 
 import { reactive, computed } from 'vue'
+import { writeUrlState, readUrlSid } from '../urlState'
 
 export type MainView = 'chat' | 'memory'
 export type Theme = 'light' | 'dark'
@@ -45,6 +46,8 @@ export const currentView = computed(() => state.view)
 
 export function setView(v: MainView): void {
   state.view = v
+  // 固定链接：视图切换时同步 URL hash，保留当前选中的会话（sid 从 hash 读取，避免反向依赖 sessions store）
+  writeUrlState(v, readUrlSid())
 }
 
 // ---- 主题切换 ----

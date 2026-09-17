@@ -4,6 +4,7 @@
 import { reactive, computed } from 'vue'
 import { apiFetch, fetchPoster, API_BASE, type PosterStatus } from '../api/client'
 import { shareSession as apiShare, unshareSession as apiUnshare } from '../api/share'
+import { writeUrlState, readUrlView } from '../urlState'
 import type { ChatMessage, SessionSummary } from '../types'
 
 interface SessionState {
@@ -108,11 +109,15 @@ export async function newSession(): Promise<string> {
   state.list = [{ session_id: sid, title: '新会话', created_at: null, updated_at: null, preview: '' }, ...state.list]
   state.currentId = sid
   state.messages = []
+  // 固定链接：新建会话即写入 URL，刷新后保持在该会话
+  writeUrlState(readUrlView(), sid)
   return sid
 }
 
 export async function selectSession(sid: string): Promise<void> {
   state.currentId = sid
+  // 固定链接：选中会话即写入 URL，刷新后恢复选中态
+  writeUrlState(readUrlView(), sid)
   state.loading = true
   try {
     const data = await apiFetch<{ session_id: string; messages: unknown[] }>(`/sessions/${sid}`)
@@ -190,6 +195,8 @@ export async function deleteSession(sid: string): Promise<void> {
   if (state.currentId === sid) {
     state.currentId = null
     state.messages = []
+    // 固定链接：删除当前会话后清掉 URL 中的 sid
+    writeUrlState(readUrlView(), null)
   }
 }
 

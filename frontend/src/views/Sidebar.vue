@@ -7,6 +7,7 @@ import {
   sessionsListLoading, sessionsListError,
 } from '../store/sessions'
 import { sidebarOpen, closeSidebar } from '../store/ui'
+import { fmtConvTime } from '../utils/time'
 
 const renamingId = ref<string | null>(null)
 const renameValue = ref('')
@@ -102,13 +103,6 @@ function showTip(msg: string) {
   if (tipTimer) clearTimeout(tipTimer)
   tipTimer = setTimeout(() => (shareTip.value = ''), 3000)
 }
-
-function fmtDate(iso: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return ''
-  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
 </script>
 
 <template>
@@ -147,9 +141,9 @@ function fmtDate(iso: string | null): string {
           <div class="item-main">
             <span class="title">{{ s.title }}</span>
             <span v-if="s.shared" class="badge shared">已共享</span>
-            <span class="time">{{ fmtDate(s.updated_at) }}</span>
           </div>
           <div class="preview">{{ s.preview || '（空会话）' }}</div>
+          <div class="conv-time">{{ fmtConvTime(s.updated_at) }}</div>
           <div class="actions">
             <button
               class="mini"
@@ -190,7 +184,7 @@ function fmtDate(iso: string | null): string {
 .item-main { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
 .title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge.shared { background: var(--chip-bg); color: var(--accent); font-size: 10px; padding: 1px 6px; border-radius: 999px; flex: none; }
-.time { font-size: 11px; color: var(--muted); flex: none; }
+.conv-time { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
 .preview { font-size: 12px; color: var(--muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .actions { margin-top: 6px; display: flex; gap: 8px; visibility: hidden; flex-wrap: wrap; }
 .item:hover .actions, .item.active .actions { visibility: visible; }

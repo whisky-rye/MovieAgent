@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { authUser, logout } from '../store/auth'
 import { currentView, setView, sidebarOpen, toggleSidebar, closeSidebar, theme, toggleTheme } from '../store/ui'
+import { loadSessions, selectSession, sessionList } from '../store/sessions'
+import { readUrlState } from '../urlState'
 import { exportSessionsZip } from '../api/export'
 import Sidebar from './Sidebar.vue'
 import ChatView from './ChatView.vue'
@@ -32,6 +34,20 @@ function showTip(msg: string): void {
   if (tipTimer) clearTimeout(tipTimer)
   tipTimer = setTimeout(() => (exportTip.value = ''), 4000)
 }
+
+// 会话列表固定链接：进入主页时读取 URL hash，恢复「视图 + 选中会话」，
+// 使 F5 刷新后停留在会话列表当前状态而非跳回首页。
+onMounted(async () => {
+  const { view, sid } = readUrlState()
+  setView(view)
+  if (sid) {
+    await loadSessions()
+    // 仅当该会话确实存在于当前用户列表时才恢复选中，避免选中已删除的会话
+    if (sessionList.value.some((s) => s.session_id === sid)) {
+      await selectSession(sid)
+    }
+  }
+})
 </script>
 
 <template>
