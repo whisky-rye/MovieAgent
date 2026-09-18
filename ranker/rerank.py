@@ -29,6 +29,7 @@ def rerank(
     user_genres: list[str] | None = None,
     lambda_div: float | None = None,
     query: Optional[str] = None,
+    feedback_profile: dict | None = None,
     # —— P2 二级 pipeline 显式开关（优先级高于 strategy 兼容映射）——
     diversify: bool | None = None,
     llm_topn: int | None = None,
@@ -64,22 +65,26 @@ def rerank(
                 cands, fusion_detail = rrf_fuse(
                     recall, user_genres=user_genres, k=settings.RRF_K,
                     weights=settings.RRF_WEIGHTS_DICT, explain=True,
+                    feedback_profile=feedback_profile,
                 )
             else:
                 cands = rrf_fuse(
                     recall, user_genres=user_genres, k=settings.RRF_K,
                     weights=settings.RRF_WEIGHTS_DICT,
+                    feedback_profile=feedback_profile,
                 )
         else:
             if explain:
                 cands, fusion_detail = fuse(
                     recall, user_genres=user_genres,
                     weights=settings.RRF_WEIGHTS_DICT, explain=True,
+                    feedback_profile=feedback_profile,
                 )
             else:
                 cands = fuse(
                     recall, user_genres=user_genres,
                     weights=settings.RRF_WEIGHTS_DICT,
+                    feedback_profile=feedback_profile,
                 )
     else:
         cands = recall

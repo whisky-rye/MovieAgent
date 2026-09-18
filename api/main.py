@@ -31,6 +31,7 @@ from api.routes.auth import router as auth_router  # G1：登录/注册/me
 from api.routes.export import router as export_router  # 会话历史导出（zip）
 from api.routes.share import router as share_router  # G-Share：会话共享 / 公开只读查看
 from api.routes.poster import router as poster_router  # G-Poster：Top3 宣传海报查询/下载
+from api.routes.feedback import router as feedback_router  # O11：用户反馈采集
 from api.deps import get_current_user, CurrentUser  # G1：鉴权依赖（注入 user_id）
 from api.cors import cors_enforce  # O7/E5：CORS 生产白名单硬拦截
 from agent.session_store import get_session_store  # G3：会话落库
@@ -156,6 +157,7 @@ app.include_router(export_router)
 app.include_router(share_router)
 # G-Poster：Top3 宣传海报查询/下载（GET，CSRF 中间件天然豁免）
 app.include_router(poster_router)
+app.include_router(feedback_router)
 
 
 @app.middleware("http")
@@ -333,6 +335,19 @@ def _build_history(session_id: Optional[str]) -> str:
         return ""
 
 
+def _log_impressions(user_id: str, query: str, ranked: list) -> None:
+    """O11：把当次推荐结果批量记为曝光（impression），rank 即名次，供反馈聚合做位置偏差校正。"""
+    from agent.feedback_store import get_feedback_store, SIGNAL_IMPRESSION
+
+    store = get_feedback_store()
+    for i, c in enumerate(ranked, start=1):
+        store.record(
+            user_id, c.id, SIGNAL_IMPRESSION,
+            genres=getattr(c, "genres", None) or None,
+            rank=i, query=query,
+        )
+
+
 def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[str] = None) -> dict:
     """同步跑 Agent，返回完整 state（answer + ranked 候选）。
 
@@ -384,6 +399,15 @@ def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[st
             config={"metadata": run_metadata(user_id, request_id)},
         )
     ranked = result.get("ranked", []) or []
+    # O11：推荐结果曝光埋点（失败不影响主流程，try 包裹）
+    if settings.FEEDBACK_REWEIGHT_ENABLED and ranked:
+        try:
+            _log_impressions(user_id, query, ranked)
+        except Exception as e:  # noqa: BLE001
+            logger_api.warning(
+                "曝光埋点失败（忽略）", extra={"event": "impression_error",
+                "user_id": user_id, "request_id": request_id, "err": str(e)[:120]},
+            )
     return {
         "answer": result.get("answer", ""),
         "intent": result.get("intent", ""),

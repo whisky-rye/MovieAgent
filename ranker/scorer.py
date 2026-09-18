@@ -32,12 +32,41 @@ def _quality_pref(c: Candidate, user_genres: list[str] | None) -> tuple[float, f
     return quality, pref
 
 
+# 回灌强度（与 agent/feedback_store 对称；集中在此便于调参）
+GENRE_AFFINITY_SCALE = 0.3
+
+
+def _feedback_term(c: Candidate, profile: dict | None) -> float:
+    """O11 反馈调权项：基于用户反馈画像对单个 candidate 加分/降权。
+
+    - item 在黑名单（踩过）→ 强降权，直接返回（沉底）。
+    - item 在加分集（赞过/点过）→ 加分。
+    - 类型亲和度：与候选类型重叠度加权（叠加在自述 user_genres 偏好之上）。
+    命中黑名单直接返回，避免被后续加分抵消。
+    """
+    if not profile:
+        return 0.0
+    aid = c.id
+    black = profile.get("item_blacklist") or {}
+    if aid in black:
+        return float(black[aid])
+    t = 0.0
+    boost = profile.get("item_boost") or {}
+    if aid in boost:
+        t += float(boost[aid])
+    ga = profile.get("genre_affinity") or {}
+    if ga and c.genres:
+        t += sum(ga.get(g, 0.0) for g in c.genres) * GENRE_AFFINITY_SCALE
+    return t
+
+
 def fuse(
     recall: dict[str, list[Candidate]],
     weights: dict | None = None,
     user_genres: list[str] | None = None,
     top_k: int | None = None,
     explain: bool = False,
+    feedback_profile: dict | None = None,
 ) -> list[Candidate] | tuple[list[Candidate], dict]:
     """把多路召回按来源加权融合，叠加质量分与偏好分，返回按综合分降序的列表。
 
@@ -61,7 +90,7 @@ def fuse(
         for c in cands:
             base = src_w * norm[src].get(c.score, 0.5)
             quality, pref = _quality_pref(c, user_genres)
-            total = base + quality + pref
+            total = base + quality + pref + _feedback_term(c, feedback_profile)
             if c.id in merged:
                 merged[c.id].score = max(merged[c.id].score, total)
                 if c.recall_source and c.recall_source not in merged[c.id].recall_source:

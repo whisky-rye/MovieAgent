@@ -194,6 +194,12 @@ class Settings(BaseSettings):
     # 是否传 instruct（自定义排序任务指令）；默认 True（推荐场景：匹配用户偏好）
     CLOUD_RERANK_USE_INSTRUCT: bool = True
 
+    # ---- O11 用户反馈调权闭环 ----
+    # 是否启用「反馈→排序」回灌（默认开；保留开关便于回退/灰度；环境变量 FEEDBACK_REWEIGHT_ENABLED 可关）
+    FEEDBACK_REWEIGHT_ENABLED: bool = True
+    # 反馈时间衰减半衰期（天）：旧反馈按 0.5^(age/半衰期) 淡出（环境变量 FEEDBACK_HALF_LIFE_DAYS 可改）
+    FEEDBACK_HALF_LIFE_DAYS: int = 30
+
     # ---- 推荐海报生成（阿里百炼视觉模型，G-Poster） ----
     # 每次对话完成后，调用百炼视觉模型为推荐列表 Top3 生成宣传海报（文生图）。
     # 与 rerank/embed 同一供应商、同一 Key，专属键留空即回退 CLOUD_LLM_*。

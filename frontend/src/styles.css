@@ -69,6 +69,14 @@
   --item-active-bg: #eef2ff;
   --item-active-border: #c7d2fe;
 
+  /* 用户反馈（O11）：喜欢 / 不喜欢 的选中态与徽章 */
+  --fb-like-bg: #e8f7ee;
+  --fb-like-border: #a7e0bf;
+  --fb-like-fg: #16794c;
+  --fb-dislike-bg: #fdecec;
+  --fb-dislike-border: #f5bcbc;
+  --fb-dislike-fg: #b3261e;
+
   /* 遮罩 / 阴影 */
   --overlay: rgba(0, 0, 0, 0.32);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
@@ -132,6 +140,13 @@ html[data-theme='dark'] {
 
   --item-active-bg: #2c3852;
   --item-active-border: #3b4a6b;
+
+  --fb-like-bg: #1f3529;
+  --fb-like-border: #33604a;
+  --fb-like-fg: #6fd39b;
+  --fb-dislike-bg: #3a2323;
+  --fb-dislike-border: #5c3232;
+  --fb-dislike-fg: #f0908a;
 
   --overlay: rgba(0, 0, 0, 0.55);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);

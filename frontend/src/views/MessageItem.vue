@@ -3,6 +3,8 @@ import { ref } from 'vue'
 import { renderMarkdown } from '../utils/md'
 import { doubanUrl, imdbUrl } from '../utils/extlinks'
 import { fmtConvTime } from '../utils/time'
+import { stateOf, submitFeedback, submitClick } from '../store/feedback'
+import { authUser } from '../store/auth'
 import type { ChatItem, ChatMessage, ChatStep } from '../types'
 
 defineProps<{ message: ChatMessage }>()
@@ -41,6 +43,26 @@ function doubanUrlFor(it: ChatItem): string | null {
 }
 function imdbUrlFor(it: ChatItem): string | null {
   return imdbUrl(it.imdb_id)
+}
+
+// O11 反馈闭环：
+// - fb(it)：读全局反馈状态（后端恢复 + 本地乐观更新），驱动按钮高亮与徽章；
+// - onFeedback：喜欢/不喜欢互斥切换（切另一个=切换，点同一个=取消），状态收口在 store；
+// - onCardClick：卡片点击记一次 click 埋点（同一作品只记一次，不干扰赞踩状态）。
+const clickedSet = new Set<string>()
+
+function fb(it: ChatItem): 'like' | 'dislike' | undefined {
+  return stateOf(it.id)
+}
+
+function onFeedback(it: ChatItem, signal: 'like' | 'dislike'): void {
+  submitFeedback(it.id, signal, it.genres, authUser.value?.user_id)
+}
+
+function onCardClick(it: ChatItem): void {
+  if (clickedSet.has(it.id)) return
+  clickedSet.add(it.id)
+  submitClick(it.id, it.genres, authUser.value?.user_id)
 }
 </script>
 
@@ -84,10 +106,20 @@ function imdbUrlFor(it: ChatItem): string | null {
 
         <!-- 候选影片 -->
         <div v-if="message.items && message.items.length" class="items">
-          <div v-for="it in message.items" :key="it.id" class="item-card">
+          <div
+            v-for="it in message.items"
+            :key="it.id"
+            class="item-card"
+            :class="{ 'is-liked': fb(it) === 'like', 'is-disliked': fb(it) === 'dislike' }"
+            @click="onCardClick(it)"
+          >
             <div class="item-head">
               <span class="item-title">{{ it.title }}</span>
               <span v-if="it.year" class="item-year">({{ it.year }})</span>
+              <!-- 历史操作标识：刷新/重进会话后依然显示 -->
+              <span v-if="fb(it)" class="fb-flag" :class="fb(it)">
+                {{ fb(it) === 'like' ? '已喜欢' : '已不喜欢' }}
+              </span>
               <span class="src" :class="it.source">{{ it.source_label }}</span>
             </div>
             <div class="item-meta">
@@ -97,9 +129,26 @@ function imdbUrlFor(it: ChatItem): string | null {
               <span v-if="it.genres && it.genres.length" class="muted">{{ it.genres.join(' / ') }}</span>
             </div>
             <div v-if="it.recall_source" class="recall">召回：{{ it.recall_source }}</div>
+            <!-- 链接与反馈同排：链接靠左、反馈靠右对齐（窄屏自动换行时反馈仍贴行尾） -->
             <div class="links">
-              <a v-if="doubanUrlFor(it)" class="ext douban" :href="doubanUrlFor(it)" target="_blank" rel="noopener noreferrer">豆瓣详情 ↗</a>
-              <a v-if="imdbUrlFor(it)" class="ext imdb" :href="imdbUrlFor(it)" target="_blank" rel="noopener noreferrer">IMDb 详情 ↗</a>
+              <a v-if="doubanUrlFor(it)" class="ext douban" :href="doubanUrlFor(it)" target="_blank" rel="noopener noreferrer" @click.stop>豆瓣详情 ↗</a>
+              <a v-if="imdbUrlFor(it)" class="ext imdb" :href="imdbUrlFor(it)" target="_blank" rel="noopener noreferrer" @click.stop>IMDb 详情 ↗</a>
+              <span class="fb-group">
+                <button
+                  class="fb-btn like"
+                  :class="{ on: fb(it) === 'like' }"
+                  :aria-pressed="fb(it) === 'like'"
+                  :title="fb(it) === 'like' ? '取消喜欢' : '喜欢'"
+                  @click.stop="onFeedback(it, 'like')"
+                >👍<span class="fb-text">喜欢</span></button>
+                <button
+                  class="fb-btn dislike"
+                  :class="{ on: fb(it) === 'dislike' }"
+                  :aria-pressed="fb(it) === 'dislike'"
+                  :title="fb(it) === 'dislike' ? '取消不喜欢' : '不喜欢'"
+                  @click.stop="onFeedback(it, 'dislike')"
+                >👎<span class="fb-text">不喜欢</span></button>
+              </span>
             </div>
           </div>
         </div>
@@ -168,11 +217,25 @@ function imdbUrlFor(it: ChatItem): string | null {
   max-height: 240px; overflow: auto; line-height: 1.6;
 }
 
-.items { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-top: 10px; }
-.item-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--surface); }
+/* 候选影片网格：最小列宽 260px，保证「两个详情链接 + 两个反馈按钮」能在一行内排开 */
+.items { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+.item-card {
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  background: var(--surface); cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+/* 已操作状态：整卡描边呼应，配合标题旁徽章与按钮高亮 */
+.item-card.is-liked { border-color: var(--fb-like-border); }
+.item-card.is-disliked { border-color: var(--fb-dislike-border); }
 .item-head { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; }
 .item-title { font-weight: 600; font-size: 14px; }
 .item-year { color: var(--muted); font-size: 12px; }
+.fb-flag {
+  font-size: 10px; line-height: 1; padding: 2px 6px; border-radius: 999px;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.fb-flag.like { background: var(--fb-like-bg); border-color: var(--fb-like-border); color: var(--fb-like-fg); }
+.fb-flag.dislike { background: var(--fb-dislike-bg); border-color: var(--fb-dislike-border); color: var(--fb-dislike-fg); }
 .src { margin-left: auto; font-size: 11px; padding: 0 6px; border-radius: 4px; }
 .src.douban { background: var(--src-douban-bg); color: var(--src-douban-fg); }
 .src.imdb { background: var(--src-imdb-bg); color: var(--src-imdb-fg); }
@@ -180,16 +243,35 @@ function imdbUrlFor(it: ChatItem): string | null {
 .rating { color: var(--rating); font-weight: 600; }
 .muted { color: var(--muted); }
 .recall { margin-top: 4px; font-size: 11px; color: var(--recall-fg); }
-.links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.links { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .ext {
   display: inline-flex; align-items: center; gap: 2px;
-  font-size: 12px; text-decoration: none; line-height: 1;
-  padding: 4px 8px; border-radius: 6px; border: 1px solid transparent;
+  font-size: 11px; text-decoration: none; line-height: 1; white-space: nowrap;
+  padding: 4px 7px; border-radius: 6px; border: 1px solid transparent;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 .ext:hover { filter: brightness(0.97); }
 .ext.douban { background: var(--src-douban-bg); color: var(--src-douban-fg); border-color: var(--src-douban-border); }
 .ext.imdb { background: var(--src-imdb-bg); color: var(--src-imdb-fg); border-color: var(--src-imdb-border); }
+
+/* O11 反馈按钮：靠右对齐成一组，互斥高亮 */
+.fb-group { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.fb-btn {
+  display: inline-flex; align-items: center; gap: 3px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--fg);
+  font-size: 11px; line-height: 1; padding: 4px 8px; border-radius: 999px;
+  cursor: pointer; white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.fb-btn:hover { background: var(--surface-2); }
+.fb-btn.like.on {
+  background: var(--fb-like-bg); border-color: var(--fb-like-border);
+  color: var(--fb-like-fg); font-weight: 600;
+}
+.fb-btn.dislike.on {
+  background: var(--fb-dislike-bg); border-color: var(--fb-dislike-border);
+  color: var(--fb-dislike-fg); font-weight: 600;
+}
 
 .poster-block {
   margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px;

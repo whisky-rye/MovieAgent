@@ -11,6 +11,7 @@
   并随流式 sink 实时推送（/recommend/stream）。
 """
 import json
+import logging
 import time
 import re
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -18,8 +19,11 @@ from langgraph.graph import StateGraph, START, END
 
 from agent.state import AgentState
 from agent.prompt import SYSTEM_PROMPT, INTENT_PROMPT
+
+logger = logging.getLogger("movie_agent.graph")
 from agent.tools import RUNNERS
 from agent.memory import get_memory_store
+from agent.feedback_store import get_feedback_store
 from retrieval import content_recall
 from ranker import rerank
 from config.settings import settings
@@ -191,12 +195,24 @@ def _plan(state: AgentState) -> AgentState:
     return {"slots": slots, "plan": plan, "steps": [step]}
 
 
+def _feedback_profile_for(uid: str) -> dict | None:
+    """O11：拉取用户反馈画像（失败静默降级为 None，绝不阻断主链路）。"""
+    if not settings.FEEDBACK_REWEIGHT_ENABLED:
+        return None
+    try:
+        return get_feedback_store().get_profile(uid, half_life_days=settings.FEEDBACK_HALF_LIFE_DAYS)
+    except Exception as e:  # noqa: BLE001 - 反馈存储异常不影响推荐
+        logger.warning("拉取反馈画像失败（跳过调权）: %s", e)
+        return None
+
+
 def _execute(state: AgentState) -> AgentState:
     t0 = time.time()
     uid = state.get("user_id", "default")
     slots = dict(state.get("slots", {}))
     prefs = get_memory_store().get_prefs(uid)
     user_genres = prefs.get("genres")
+    feedback_profile = _feedback_profile_for(uid)
     recall: dict[str, list] = {}
     try:
         for name in state.get("plan", []):
@@ -211,7 +227,8 @@ def _execute(state: AgentState) -> AgentState:
                 recall[name] = RUNNERS[name](eff, prefs, top_k=20)
         res = rerank(recall, diversify=settings.RERANK_DIVERSIFY,
                      llm_topn=settings.RERANK_LLM_TOPN, query=state.get("query"),
-                     top_k=20, user_genres=user_genres, explain=True)
+                     top_k=20, user_genres=user_genres,
+                     feedback_profile=feedback_profile, explain=True)
         fusion_detail = res.get("fusion_detail") if isinstance(res, dict) else {}
         ranked = res["ranked"] if isinstance(res, dict) else res
     except Exception as e:
@@ -250,9 +267,11 @@ def _reflect(state: AgentState) -> AgentState:
         merged = state.get("candidates", {})
         merged["coldstart_fallback"] = board
         user_genres = get_memory_store().get_prefs(state.get("user_id", "default")).get("genres")
+        feedback_profile = _feedback_profile_for(state.get("user_id", "default"))
         res = rerank(merged, diversify=settings.RERANK_DIVERSIFY,
                      llm_topn=settings.RERANK_LLM_TOPN, query=state.get("query"),
-                     top_k=20, user_genres=user_genres, explain=True)
+                     top_k=20, user_genres=user_genres,
+                     feedback_profile=feedback_profile, explain=True)
         fusion_detail = res.get("fusion_detail") if isinstance(res, dict) else {}
         ranked = res["ranked"] if isinstance(res, dict) else res
         elapsed = int((time.time() - t0) * 1000)

@@ -9,7 +9,7 @@
 并最终仍过 MMR / 可选 LLM 精排（见 rerank）。v2.14 由 config.FUSION_STRATEGY 切换。
 """
 from retrieval.candidates import Candidate
-from ranker.scorer import _as_dict, _quality_pref
+from ranker.scorer import _as_dict, _quality_pref, _feedback_term
 
 # 顶层召回 dict 的 key（graph 规划名）映射到规范来源权重键，
 # 以修正原 score 路径「顶层 key 全回退等权 1.0」的隐性失效。
@@ -35,6 +35,7 @@ def rrf_fuse(
     user_genres: list[str] | None = None,
     key_to_canon: dict | None = None,
     explain: bool = False,
+    feedback_profile: dict | None = None,
 ) -> list[Candidate] | tuple[list[Candidate], dict]:
     """按排名位次做 RRF 融合，再叠加质量分/偏好分，返回综合分降序列表。
 
@@ -82,7 +83,7 @@ def rrf_fuse(
         c = best[cid]
         quality, pref = _quality_pref(c, user_genres)
         d = _as_dict(c)
-        d["score"] = base + quality + pref
+        d["score"] = base + quality + pref + _feedback_term(c, feedback_profile)
         d["recall_source"] = "|".join(sources.get(cid, [])) or (c.recall_source or "")
         merged[cid] = Candidate(**d)
         emap[cid] = {

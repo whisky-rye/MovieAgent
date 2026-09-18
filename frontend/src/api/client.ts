@@ -76,3 +76,33 @@ export interface PosterStatus {
 export async function fetchPoster(sessionId: string): Promise<PosterStatus> {
   return apiFetch<PosterStatus>(`/poster/${encodeURIComponent(sessionId)}`)
 }
+
+// O11 用户反馈闭环：赞踩/点击上报（POST，带 CSRF 双提交）
+// signal 语义：like/dislike 为互斥的显式反馈；click 为隐式埋点；cancel 撤销该作品的赞/踩。
+export type FeedbackSignal = 'like' | 'dislike' | 'click' | 'cancel'
+export type FeedbackState = 'like' | 'dislike'
+
+export interface FeedbackPayload {
+  item_id: string
+  signal: FeedbackSignal
+  genres?: string[]
+  rank?: number
+  query?: string
+  // 显式携带当前用户身份：消除"刷新后恢复不到"的环境歧义（不再仅靠 cookie 推断用户）。
+  // AUTH 开启时后端以 token 内 user_id 为准、忽略此字段；AUTH 关闭时作为显式身份。
+  user_id?: string
+}
+
+export async function postFeedback(payload: FeedbackPayload): Promise<{ ok: boolean; state?: FeedbackState | null }> {
+  return apiFetch<{ ok: boolean; state?: FeedbackState | null }>('/feedback', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+// 拉取当前用户已赞/已踩的作品，用于刷新或重进会话后恢复按钮选中态。
+// userId 显式传入时拼到 query，确保恢复的是「同一用户」的历史（避免落到 default）。
+export async function fetchMyFeedback(userId?: string): Promise<{ items: Record<string, FeedbackState> }> {
+  const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : ''
+  return apiFetch<{ items: Record<string, FeedbackState> }>(`/feedback/mine${qs}`)
+}

@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { authUser, logout } from '../store/auth'
 import { currentView, setView, sidebarOpen, toggleSidebar, closeSidebar, theme, toggleTheme } from '../store/ui'
 import { loadSessions, selectSession, sessionList } from '../store/sessions'
+import { loadMyFeedback, resetFeedback } from '../store/feedback'
 import { readUrlState } from '../urlState'
 import { exportSessionsZip } from '../api/export'
 import Sidebar from './Sidebar.vue'
@@ -38,6 +39,9 @@ function showTip(msg: string): void {
 // 会话列表固定链接：进入主页时读取 URL hash，恢复「视图 + 选中会话」，
 // 使 F5 刷新后停留在会话列表当前状态而非跳回首页。
 onMounted(async () => {
+  // 反馈状态（O11）：与列表加载并行拉取，不阻塞首屏；恢复「已喜欢/已不喜欢」标记。
+  // 显式带上当前用户身份，确保刷新/重进会话后恢复的是「同一用户」的历史（不落到 default）。
+  loadMyFeedback(authUser.value?.user_id)
   const { view, sid } = readUrlState()
   setView(view)
   if (sid) {
@@ -48,6 +52,12 @@ onMounted(async () => {
     }
   }
 })
+
+// 退出登录：清掉内存中的反馈标记，避免下一个账号看到上一个账号的操作痕迹
+function onLogout(): void {
+  resetFeedback()
+  logout()
+}
 </script>
 
 <template>
@@ -104,7 +114,7 @@ onMounted(async () => {
           </svg>
         </button>
         <span class="uname">{{ authUser?.username }}</span>
-        <button class="link" @click="logout">退出</button>
+        <button class="link" @click="onLogout">退出</button>
       </div>
     </header>
 

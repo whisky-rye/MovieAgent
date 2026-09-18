@@ -53,3 +53,21 @@ CREATE TABLE IF NOT EXISTS `users` (
   `updated_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY `uniq_users_userid` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- O11 用户反馈闭环：行为反馈原始流水（强 MySQL，应用层保证幂等/去重）
+-- 信号：explicit_like / explicit_dislike（前端赞踩） / click（卡片点击） / impression（推荐曝光）
+-- genres 仅显式赞踩携带，用于聚合类型亲和度；impression 记 rank 用于位置偏差校正
+CREATE TABLE IF NOT EXISTS `user_feedback` (
+  `id`         BIGINT      NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `user_id`    VARCHAR(64) NOT NULL,
+  `item_id`    VARCHAR(64) NOT NULL,          -- 与推荐一致：douban:{id} / imdb:{id}
+  `item_kind`  VARCHAR(16) NOT NULL DEFAULT 'movie',
+  `signal`     VARCHAR(24) NOT NULL,
+  `rank`       SMALLINT    NULL,              -- 当次推荐中的名次（曝光信号用）
+  `query`      VARCHAR(255) NULL,             -- 触发推荐的 query（上下文）
+  `genres`     VARCHAR(255) NULL,             -- 逗号分隔，仅显式赞踩携带
+  `weight`     FLOAT       NOT NULL DEFAULT 1.0,
+  `created_at` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY `idx_fb_user` (`user_id`, `created_at`),
+  KEY `idx_fb_item` (`user_id`, `item_id`, `signal`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
