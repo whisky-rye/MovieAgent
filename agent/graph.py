@@ -321,6 +321,12 @@ def _generate(state: AgentState) -> AgentState:
         token_sink=token_sink, thinking_sink=thinking_sink,
         history=state.get("history", "") or "",
     )
+    # 第 3 层护栏：生成后闸门，拦截输出中的注入回显 / 策略泄漏 / 有害 how-to
+    from agent.guardrail import check_output
+    out_gate = check_output(answer)
+    if out_gate.action == "block":
+        logger.warning("输出护栏拦截（替换为安全文案）: %s", out_gate.reason)
+        answer = out_gate.message
     elapsed = int((time.time() - t0) * 1000)
     # 来源标记：对话末尾追加一句话来源概况；详细分源结构走 API sources 字段
     meta = build_source_meta(ranked)

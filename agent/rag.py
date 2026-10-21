@@ -3,6 +3,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from retrieval.candidates import Candidate
 from llm.client import chat_strong, strip_think
 from agent.prompt import EXPLAIN_PROMPT
+from config.settings import settings
+from agent.guardrail import sanitize_context
 
 
 def _extract_thinking(msg) -> str:
@@ -53,12 +55,19 @@ def _chunk_thinking(chunk) -> str:
 
 
 def build_context(ranked: list[Candidate], top_n: int = 8) -> str:
-    """把候选拼成可喂给 LLM 的检索上下文（标题/年份/类型/评分/简介）。"""
+    """把候选拼成可喂给 LLM 的检索上下文（标题/年份/类型/评分/简介）。
+
+    第 2 层护栏：拼接前对每个候选简介做上下文净化（去零宽/控制字符与强注入标记），
+    降低 RAG 被检索内容注入的风险（主防御见 EXPLAIN_PROMPT 边界指令）。
+    """
     lines = []
     for i, c in enumerate(ranked[:top_n], 1):
         g = "/".join(c.genres[:3]) if c.genres else "-"
         r = f"{c.rating:.1f}" if c.rating else "未知"
-        doc = (c.doc or "").strip().replace("\n", " ")[:240]
+        doc = (c.doc or "").strip().replace("\n", " ")
+        if settings.GUARDRAIL_SANITIZE_CONTEXT:
+            doc, _ = sanitize_context(doc)
+        doc = doc[:240]
         lines.append(f"{i}. 《{c.title}》({c.year}) 类型:{g} 评分:{r} 简介:{doc}")
     return "\n".join(lines) if lines else "（无候选）"
 

@@ -27,8 +27,9 @@ def test_movie_agent_dsn():
 
 
 def test_rrf_weights_dict():
+    # graph 为知识图谱多跳召回权重（F1/O12），由 .env RRF_WEIGHTS 覆盖默认值
     assert cs.settings.RRF_WEIGHTS_DICT == {
-        "content": 1.0, "relation": 0.8, "coldstart": 0.6,
+        "content": 1.0, "relation": 0.8, "coldstart": 0.6, "graph": 0.7,
     }
 
 

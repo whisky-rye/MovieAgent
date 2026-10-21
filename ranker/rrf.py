@@ -16,8 +16,9 @@ from ranker.scorer import _as_dict, _quality_pref, _feedback_term
 # 内部 search_similar 已用规范键 content/relation，映射后保持不变。
 _PLAN_TO_CANON = {
     "search_by_text": "content",
-    "search_similar": "content",   # 内部已融合 content+relation
+    "search_similar": "content",   # 内部已融合 content+relation+graph
     "similar": "content",          # graph 顶层 similar 也是已融合列表
+    "search_graph": "graph",       # 知识图谱多跳召回（F1/O12）
     "high_quality_board": "coldstart",
     "coldstart_fallback": "coldstart",
 }

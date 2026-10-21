@@ -137,10 +137,28 @@ class Settings(BaseSettings):
     # HTTP 请求/响应体记录开关（/recommend、/chat 的 query/answer 片段）；默认关，避免大文本落盘
     ACCESS_LOG_BODY: bool = False
 
-    # ---- 内容安全护栏（P5 补充：敏感拒答 / 越域引导） ----
+    # ---- 内容安全护栏（P5 补充：敏感拒答 / 越域引导 / 提示注入防护） ----
     GUARDRAIL_ENABLED: bool = True          # 总开关；False 则全部放行
     GUARDRAIL_BLOCK_OFFTOPIC: bool = True   # 越域（非影视）是否引导；False 则交给 Agent 降级处理
     GUARDRAIL_MODE: str = "rule"            # rule（零额度，纯本地规则）| hybrid（边界 case 调 chat_light 复核）
+    # —— 高规格分层防护（S3：输入净化 + 边界约束）——
+    # 提示注入 / 越狱尝试：命中即硬拒答（更高规格，默认拦截），不进入 Agent、不耗额度。
+    GUARDRAIL_BLOCK_INJECTION: bool = True
+    # 生成后输出护栏：扫描回答中的注入回显 / 策略泄漏 / 有害 how-to，命中以安全文案兜底替换。
+    GUARDRAIL_OUTPUT_GATE: bool = True
+    # 检索上下文净化：喂给 LLM 的检索片段去除注入标记 / 零宽字符，降低 RAG 被注入风险。
+    GUARDRAIL_SANITIZE_CONTEXT: bool = True
+    # 输入长度上限（字符），超长截断，防止畸形/填充攻击。
+    GUARDRAIL_MAX_QUERY_LEN: int = 2000
+
+    # ---- 知识图谱召回（F1/O12） ----
+    # 默认开启：多跳图谱召回（影片→人物→影片 + 可选类型/地区）并入融合，
+    # 解决原 relation_recall 仅 1 跳「同剧组」覆盖不足的问题。生产可整库换 Neo4j（接口不变）。
+    GRAPH_ENABLED: bool = True
+    GRAPH_MAX_HOPS: int = 2                 # 多跳层数（2 = 影片→人物→影片→人物→影片）
+    GRAPH_EXPAND_GENRE: bool = True         # 是否经「同类型」扩展（增加多样性）
+    GRAPH_EXPAND_COUNTRY: bool = False      # 是否经「同地区」扩展（默认关，信号弱）
+    GRAPH_CACHE_MAX: int = 20000            # 邻接缓存容量上限（FIFO 淘汰）
 
     # ---- 限流（P5 补充：令牌桶） ----
     # 后端：redis（默认，多进程/多机部署）= 共享桶，总配额稳定 = 单桶配额；
@@ -172,7 +190,8 @@ class Settings(BaseSettings):
     RRF_K: int = 60
     # RRF 来源权重（P3 配置化）：内容相似最高、关系次之、冷启动兜底最低
     # （避免「同剧组」关系召回过强）。格式 key:value 逗号分隔；仅作相对偏置，可省略。
-    RRF_WEIGHTS: str = "content:1.0,relation:0.8,coldstart:0.6"
+    # graph：知识图谱多跳召回（F1/O12），与 relation 同源但覆盖更广（多跳+类型/地区），权重略低于 relation。
+    RRF_WEIGHTS: str = "content:1.0,relation:0.8,coldstart:0.6,graph:0.7"
 
     # ---- 二级重排 pipeline（P2/P3 配置化） ----
     # 融合后是否做 MMR 多样性重排（避免清一色同类型）；默认开，等价原 strategy='mmr'

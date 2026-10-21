@@ -1,4 +1,5 @@
-"""召回候选统一数据结构。召回层(retrieval/*)产出，排序层(ranker/*)消费。"""
+"""召回候选统一数据结构。召回层(retrieval/*)产出，排序层(ranker/*)消费。
+"""
 import re
 from dataclasses import dataclass, field
 
@@ -14,10 +15,11 @@ class Candidate:
     rating: float = 0.0
     rating_count: int = 0
     doc: str = ""
-    recall_source: str = ""     # content | relation | coldstart
+    recall_source: str = ""     # content | relation | coldstart | graph
     score: float = 0.0          # 召回/排序阶段综合分
     douban_id: str = ""         # 豆瓣 subject id（用于拼 detail 链接，≠ 主键 id）
     imdb_id: str = ""           # IMDb title id（形如 tt1234567，用于拼 detail 链接）
+    graph_paths: list[str] = field(default_factory=list)  # 知识图谱关系链解释（可解释召回）
 
 
 def split_genres(s) -> list[str]:

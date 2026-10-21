@@ -1,4 +1,4 @@
-"""Agent 工具集（5 个 LangChain 工具）。
+"""Agent 工具集（LangChain 工具面）。
 
 前 3 个是对接召回层的「检索工具」，返回紧凑可读摘要；同时暴露 RUNNERS 注册表，
 供 LangGraph 节点直接取 Candidate 列表做多路融合（避免字符串回解的脆弱）。
@@ -9,6 +9,7 @@ from retrieval.candidates import Candidate
 from retrieval import content_recall, relation_recall, coldstart_recall
 from ranker import rerank
 from agent.memory import get_memory_store
+from graph.recall import graph_recall, graph_recall_by_entity
 
 
 def _fmt(cands: list[Candidate], label: str) -> str:
@@ -37,9 +38,9 @@ def search_by_text(query: str, top_k: int = 10, genres: list = None,
 
 @tool
 def search_similar(item_id: str, top_k: int = 10) -> str:
-    """找与某作品相似的影片（同时融合「同导演/卡司」关系召回）。item_id 形如 douban:{PK} 或 imdb:{imdb_id}。"""
+    """找与某作品相似的影片（融合内容相似 + 同导演/卡司关系 + 知识图谱多跳扩展）。item_id 形如 douban:{PK} 或 imdb:{imdb_id}。"""
     cands = _run_search_similar(item_id, top_k)
-    return _fmt(cands, "相似+关系")
+    return _fmt(cands, "相似+关系+图谱")
 
 
 @tool
@@ -49,6 +50,22 @@ def high_quality_board(top_k: int = 10, genres: list = None,
     cands = coldstart_recall(top_k=top_k, genres=genres or None,
                              country=country or None, min_year=min_year or None)
     return _fmt(cands, "高分榜")
+
+
+@tool
+def search_graph(item_id: str, top_k: int = 10) -> str:
+    """以某作品为种子做知识图谱多跳扩展（影片→导演/编剧/卡司→其作品，含同类型/地区）。
+    item_id 形如 douban:{PK} 或 imdb:{imdb_id}。适合「这部导演还有哪些片子」「类似宇宙的其它作品」等探索。"""
+    cands = graph_recall(item_id, top_k=top_k)
+    return _fmt(cands, "知识图谱")
+
+
+@tool
+def search_by_person(name: str, top_k: int = 10) -> str:
+    """以人物名（导演/演员）为中心召回其作品与合租网络（知识图谱实体召回）。
+    例如「诺兰」「小李子」。"""
+    cands = graph_recall_by_entity(name, top_k=top_k)
+    return _fmt(cands, "人物图谱")
 
 
 @tool
@@ -84,8 +101,18 @@ def _run_search_by_text(slots: dict, prefs: dict, top_k: int = 20) -> list[Candi
 def _run_search_similar(item_id: str, top_k: int = 20) -> list[Candidate]:
     sim = content_recall(item_id=item_id, top_k=top_k)
     rel = relation_recall(item_id=item_id, top_k=top_k)
-    fused = rerank({"content": sim, "relation": rel}, strategy="score", top_k=top_k)
+    # F1/O12：知识图谱多跳扩展，与内容/关系召回一并融合，覆盖「同导演其它作品」「合作网络」等
+    graph_cands = graph_recall(item_id, top_k=top_k)
+    fused = rerank(
+        {"content": sim, "relation": rel, "graph": graph_cands},
+        strategy="score", top_k=top_k,
+    )
     return fused
+
+
+def _run_search_graph(item_id: str, top_k: int = 20) -> list[Candidate]:
+    """知识图谱多跳召回（独立召回路，可直接并入 plan）。"""
+    return graph_recall(item_id, top_k=top_k)
 
 
 def _run_board(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:
@@ -101,11 +128,13 @@ def _run_board(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:
 RUNNERS = {
     "search_by_text": _run_search_by_text,
     "search_similar": _run_search_similar,
+    "search_graph": _run_search_graph,
     "high_quality_board": _run_board,
 }
 
 
 def get_tools():
-    """返回 5 个 LangChain 工具（供交互式 tool-calling 使用）。"""
-    return [search_by_text, search_similar, high_quality_board,
-            remember_preference, explain_recommendation]
+    """返回 LangChain 工具（供交互式 tool-calling 使用）。"""
+    return [search_by_text, search_similar, search_graph, search_by_person,
+            high_quality_board, remember_preference,
+            explain_recommendation]
