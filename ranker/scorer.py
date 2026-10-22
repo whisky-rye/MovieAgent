@@ -1,6 +1,6 @@
 """排序打分：多路召回融合 + 质量/偏好加权 + MMR 多样性。"""
 from typing import Optional
-from retrieval.candidates import Candidate
+from retrieval.candidates import Candidate, work_key, merge_candidate
 
 # 各召回来源的默认融合权重（内容相似最高，关系次之，冷启动兜底最低）
 _DEFAULT_WEIGHTS = {"content": 1.0, "relation": 0.8, "coldstart": 0.6}
@@ -19,7 +19,7 @@ def _as_dict(c: Candidate) -> dict:
     return {k: getattr(c, k) for k in
             ("id", "source", "title", "year", "genres", "country",
              "rating", "rating_count", "doc", "recall_source",
-             "douban_id", "imdb_id", "graph_paths")}  # 外链 id 需要跨融合保留
+             "douban_id", "imdb_id", "graph_paths", "title_alt")}  # 外链 id / 异名 需要跨融合保留
 
 
 def _quality_pref(c: Candidate, user_genres: list[str] | None) -> tuple[float, float]:
@@ -84,26 +84,38 @@ def fuse(
         norm[src] = _minmax([c.score for c in cands])
 
     merged: dict[str, Candidate] = {}
+    wkid: dict[str, str] = {}        # work_key -> 代表候选 id（跨源归并后可能变化）
     emap: dict[str, dict] = {}
     for src, cands in recall.items():
         src_w = w.get(src, 1.0)
         for c in cands:
+            wk = work_key(c)
             base = src_w * norm[src].get(c.score, 0.5)
             quality, pref = _quality_pref(c, user_genres)
             total = base + quality + pref + _feedback_term(c, feedback_profile)
-            if c.id in merged:
-                merged[c.id].score = max(merged[c.id].score, total)
-                if c.recall_source and c.recall_source not in merged[c.id].recall_source:
-                    merged[c.id].recall_source = f"{merged[c.id].recall_source}|{c.recall_source}"
-                em = emap[c.id]
+            if wk in merged:
+                rep = merged[wk]
+                # 跨源同作品：取最高综合分、合并来源标记、归并双源外链 id 与异名(title_alt)
+                rep.score = max(rep.score, total)
+                old_id = rep.id
+                merge_candidate(rep, c)
+                if rep.id != old_id:
+                    em = emap.pop(old_id, None)
+                    if em is not None:
+                        emap[rep.id] = em
+                wkid[wk] = rep.id
+                if c.recall_source and c.recall_source not in rep.recall_source:
+                    rep.recall_source = f"{rep.recall_source}|{c.recall_source}"
+                em = emap[wkid[wk]]
                 if src not in em["sources"]:
                     em["sources"].append(src)
                 em["base_by_src"][src] = round(base, 4)
                 if total > em["best_total"]:
                     em["best_total"] = total
             else:
-                merged[c.id] = Candidate(**{**_as_dict(c), "score": total})
-                emap[c.id] = {
+                merged[wk] = Candidate(**{**_as_dict(c), "score": total})
+                wkid[wk] = c.id
+                emap[wkid[wk]] = {
                     "sources": [src] if src else [],
                     "base_by_src": {src: round(base, 4)} if src else {},
                     "quality": round(quality, 4),

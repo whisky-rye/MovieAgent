@@ -20,6 +20,7 @@ import time
 from typing import Dict, Optional, Tuple
 
 from config.settings import settings
+from observability.metrics import metrics
 
 logger = __import__("logging").getLogger("movie_agent.ratelimit")
 
@@ -163,14 +164,22 @@ class RateLimiter:
             return True, 0.0
         rb = self._ensure_redis()
         if rb is not None:
-            return rb.consume(key, tokens)
-        # 内存回退（含 Redis 初始化失败的情形）
-        with self._lock:
-            bucket = self._memory.get(key)
-            if bucket is None:
-                bucket = TokenBucket(self.rate, self.burst)
-                self._memory[key] = bucket
-        return bucket.consume(tokens)
+            ok, wait = rb.consume(key, tokens)
+        else:
+            # 内存回退（含 Redis 初始化失败的情形）
+            with self._lock:
+                bucket = self._memory.get(key)
+                if bucket is None:
+                    bucket = TokenBucket(self.rate, self.burst)
+                    self._memory[key] = bucket
+            ok, wait = bucket.consume(tokens)
+        # E4/O18：限流触发埋点（统一入口，覆盖全部端点）
+        if not ok:
+            try:
+                metrics.incr("rate_limited_total", 1, {"backend": "redis" if rb is not None else "memory"})
+            except Exception:  # noqa: BLE001
+                pass
+        return ok, wait
 
     def reset(self):
         """清空内存桶（测试 / 运维用）。"""

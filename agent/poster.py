@@ -26,6 +26,7 @@ from typing import Any, Optional
 import requests
 
 from config.settings import settings
+from observability.metrics import metrics
 
 logger = logging.getLogger("movie_agent.bailian")
 
@@ -433,6 +434,7 @@ def schedule_poster(
     top3 = items[:3]
     # 先把状态置为 pending，让前端立刻进入轮询
     _update_status(session_id, {"status": "pending", "request_id": request_id, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    metrics.incr("poster_generations_total", 1, {"status": "started"})
 
     def worker() -> None:
         try:
@@ -461,6 +463,7 @@ def schedule_poster(
                     "download_url": f"/poster/download/{session_id}?download=1",
                     "prompt": prompt,
                 })
+                metrics.incr("poster_generations_total", 1, {"status": "ready"})
             else:
                 ph = _placeholder(session_id, prompt, model)
                 if ph:
@@ -472,11 +475,14 @@ def schedule_poster(
                         "download_url": f"/poster/download/{session_id}?download=1",
                         "prompt": prompt,
                     })
+                    metrics.incr("poster_generations_total", 1, {"status": "placeholder"})
                 else:
                     _update_status(session_id, {"status": "error", "error": res.get("error") or "生成失败"})
+                    metrics.incr("poster_generations_total", 1, {"status": "error"})
         except Exception as e:
             logger.warning("schedule_poster 线程异常 session=%s: %s", session_id, e)
             _update_status(session_id, {"status": "error", "error": f"{type(e).__name__}: {e}"})
+            metrics.incr("poster_generations_total", 1, {"status": "error"})
 
     t = threading.Thread(target=worker, name=f"poster-{session_id}", daemon=True)
     t.start()

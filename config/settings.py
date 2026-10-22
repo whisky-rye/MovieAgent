@@ -151,6 +151,47 @@ class Settings(BaseSettings):
     # 输入长度上限（字符），超长截断，防止畸形/填充攻击。
     GUARDRAIL_MAX_QUERY_LEN: int = 2000
 
+    # ---- 可观测 / 监控告警（E4/O18：指标采集 + 看板 + 主动预警） ----
+    # 进程内指标注册表（零依赖，线程安全）：QPS / 延迟 / 错误率 / 额度消耗 / 降级熔断 等。
+    # 多 worker 场景：各 worker 独立计数（看板/指标取「当前进程」快照；Prometheus
+    # 文本端点可被各 worker 分别 scrape 后聚合）。如需跨进程汇总，后续可接 Redis 后端。
+    METRICS_ENABLED: bool = True          # 总开关；False 则停止埋点（零开销）
+    PROMETHEUS_ENABLED: bool = True       # GET /metrics（Prometheus 文本格式）开关
+    DASHBOARD_ENABLED: bool = True        # GET /admin/dashboard（HTML 看板）与 /admin/stats（JSON）开关
+    ALERT_WEBHOOK_URL: str = ""          # 告警回调（钉钉/飞书/Slack incoming webhook）；空=仅落日志
+    ALERT_EVAL_INTERVAL: int = 60        # 后台告警评估周期（秒）；0=关闭后台循环（仍可在 /admin/stats 手动触发）
+    # —— 告警阈值（基于指标快照评估）——
+    ALERT_ERROR_RATE: float = 0.05       # 5xx 占总请求比 ≥ 此值 → critical（疑似故障）
+    ALERT_LATENCY_P95_MS: int = 8000     # 推荐链路 P95 延迟 ≥ 此值(ms) → warning（体验劣化）
+    ALERT_GUARDRAIL_RATE: float = 0.30   # 护栏拦截占总请求比 ≥ 此值 → warning（疑似越域风暴/被攻击）
+    ALERT_LLM_QUOTA_EXHAUSTED: bool = True  # 任一模型免费额度熔断 → critical（计费风险，必须告警）
+
+    # ---- MCP 接入：生产库只读通道（docs/MCP集成可行性调研报告.md）----
+    # 🔴 红线：远端生产库仅允许 SELECT。本通道所有 SQL 必先过 mcp_prod/guard.py
+    #    （语句/表前缀白名单 + 禁多语句 + 会话 READ ONLY + 限流 + 熔断）。
+    # 按调研报告 §5：MCP 定位为「补充/校验通道」，**默认关闭**，主召回仍走本地强 MySQL。
+    MCP_ENABLED: bool = False            # 总开关：默认关闭（按需开启）
+    MCP_SERVER_NAME: str = "movie-agent-prod-readonly"
+    MCP_TRANSPORT: str = "stdio"         # stdio | sse | streamable-http
+    # —— 凭据：仅从环境变量注入，**无默认值**（不入库、不落日志）；留空即视为未配置 ——
+    MCP_DB_HOST: str = ""
+    MCP_DB_PORT: int = 3306
+    MCP_DB_USER: str = ""
+    MCP_DB_PASSWORD: str = ""
+    MCP_DB_IMDB: str = "imdb"            # 仅读 imdb_* 表
+    MCP_DB_DOUBAN: str = "imdb2"         # 仅读 douban_* 表
+    # —— 限流 / 熔断 / 超时（防打爆生产库，调研报告 §3.4/§4）——
+    MCP_RATE_LIMIT_QPM: int = 60         # 每分钟最大查询数
+    MCP_RATE_LIMIT_BURST: int = 10       # 突发桶容量
+    MCP_CIRCUIT_FAIL_THRESHOLD: int = 3  # 连续失败达阈值 → 熔断（fail-fast）
+    MCP_CIRCUIT_COOLDOWN: int = 60       # 熔断冷却秒数
+    MCP_QUERY_TIMEOUT: int = 15          # 单次查询超时（秒）
+    MCP_CONNECT_TIMEOUT: int = 10        # 连接超时（秒）
+    MCP_MAX_LIMIT: int = 200             # 单次返回最大行数（护栏 LIMIT 钳制）
+    MCP_POOL_SIZE: int = 4               # 连接池容量（按库各一份）
+    MCP_CACHE_TTL: int = 60              # 客户端短 TTL 缓存（秒），降低生产库压力
+    MCP_AUDIT_LOG: bool = True           # 查询审计日志（绝不记录凭据/参数明文）
+
     # ---- 知识图谱召回（F1/O12） ----
     # 默认开启：多跳图谱召回（影片→人物→影片 + 可选类型/地区）并入融合，
     # 解决原 relation_recall 仅 1 跳「同剧组」覆盖不足的问题。生产可整库换 Neo4j（接口不变）。
@@ -191,7 +232,8 @@ class Settings(BaseSettings):
     # RRF 来源权重（P3 配置化）：内容相似最高、关系次之、冷启动兜底最低
     # （避免「同剧组」关系召回过强）。格式 key:value 逗号分隔；仅作相对偏置，可省略。
     # graph：知识图谱多跳召回（F1/O12），与 relation 同源但覆盖更广（多跳+类型/地区），权重略低于 relation。
-    RRF_WEIGHTS: str = "content:1.0,relation:0.8,coldstart:0.6,graph:0.7"
+    # prod ：生产库只读通道补充召回（MCP），默认关闭（MCP_ENABLED=false 时该路无产出），权重最低。
+    RRF_WEIGHTS: str = "content:1.0,relation:0.8,coldstart:0.6,graph:0.7,prod:0.5"
 
     # ---- 二级重排 pipeline（P2/P3 配置化） ----
     # 融合后是否做 MMR 多样性重排（避免清一色同类型）；默认开，等价原 strategy='mmr'

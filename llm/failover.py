@@ -28,6 +28,7 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 from langchain_openai import ChatOpenAI
 from config.settings import settings
+from observability.metrics import metrics
 
 logger = logging.getLogger("movie_agent.llm")
 
@@ -164,6 +165,43 @@ def _log_llm_call(model, provider, tier, messages, result, latency_ms,
         usage["cached_tokens"], usage["total_tokens"], latency_ms,
         extra=extra,
     )
+
+
+# —— E4/O18 指标埋点（best-effort，失败静默，绝不阻断主链路）——
+def _record_llm_success(model, provider, tier, result, latency_ms):
+    try:
+        metrics.incr("llm_calls_total", 1, {"provider": provider, "tier": tier, "status": "ok"})
+        metrics.observe("llm_call_duration_ms", latency_ms, {"tier": tier})
+        u = _extract_usage(result)
+        if u.get("prompt_tokens"):
+            metrics.incr("llm_tokens_total", u["prompt_tokens"], {"kind": "input", "tier": tier})
+        if u.get("completion_tokens"):
+            metrics.incr("llm_tokens_total", u["completion_tokens"], {"kind": "output", "tier": tier})
+        if u.get("cached_tokens"):
+            metrics.incr("llm_tokens_total", u["cached_tokens"], {"kind": "cached", "tier": tier})
+    except Exception:
+        pass
+
+
+def _record_quota_exhausted(model, tier):
+    try:
+        metrics.incr("llm_quota_exhausted_total", 1, {"tier": tier, "model": model})
+    except Exception:
+        pass
+
+
+def _record_failover(tier, kind="transient"):
+    try:
+        metrics.incr("llm_failover_total", 1, {"tier": tier, "kind": kind})
+    except Exception:
+        pass
+
+
+def _record_local_fallback(model, tier):
+    try:
+        metrics.incr("llm_local_fallback_total", 1, {"tier": tier, "model": model})
+    except Exception:
+        pass
 
 
 _EXHAUSTED: set = _load_exhausted()
@@ -340,6 +378,7 @@ class FailoverChatModel(BaseChatModel):
                 _log(f"OK model={model} lat={latency_ms}ms")
                 _log_llm_call(model, "cloud", self.tier, messages, result, latency_ms,
                               self.user_id, self.request_id)
+                _record_llm_success(model, "cloud", self.tier, result, latency_ms)
                 return result
             except Exception as e:
                 if _is_quota_exhausted(e):
@@ -349,11 +388,13 @@ class FailoverChatModel(BaseChatModel):
                     logger.error("QUOTA_EXHAUSTED 模型免费额度耗尽已熔断",
                                  extra={"event": "quota_exhausted", "model": model,
                                         "tier": self.tier, "reason": _safe(e)})
+                    _record_quota_exhausted(model, self.tier)
                 else:
                     _log(f"TRANSIENT_FAIL model={model} err={_safe(e)}")
                     logger.warning("TRANSIENT_FAIL 模型瞬时失败触发降级",
                                    extra={"event": "model_fail", "model": model,
                                           "tier": self.tier, "err": _safe(e)})
+                    _record_failover(self.tier, "transient")
                 last_err = e
                 if tried >= cap:
                     _log(f"MAX_FALLBACKS_EXCEEDED 已触发 {tried - 1} 次降级，放弃")
@@ -372,6 +413,7 @@ class FailoverChatModel(BaseChatModel):
                 latency_ms = int((time.time() - t0) * 1000)
                 _log_llm_call(self.local_fallback_model, "ollama", self.tier, messages,
                               result, latency_ms, self.user_id, self.request_id)
+                _record_local_fallback(self.local_fallback_model, self.tier)
                 return result
             except Exception as le:
                 _log(f"LOCAL_FALLBACK_FAIL model={self.local_fallback_model} err={_safe(le)}")
@@ -426,11 +468,13 @@ class FailoverChatModel(BaseChatModel):
                     logger.error("QUOTA_EXHAUSTED 模型免费额度耗尽已熔断",
                                  extra={"event": "quota_exhausted", "model": model,
                                         "tier": self.tier, "reason": _safe(e)})
+                    _record_quota_exhausted(model, self.tier)
                 else:
                     _log(f"TRANSIENT_FAIL_STREAM model={model} err={_safe(e)}")
                     logger.warning("TRANSIENT_FAIL_STREAM 流式模型瞬时失败触发降级",
                                    extra={"event": "model_fail", "model": model,
                                           "tier": self.tier, "err": _safe(e)})
+                    _record_failover(self.tier, "transient")
                 if tried >= cap:
                     try:
                         res = self._run_failover(messages, stop, run_manager, kwargs, async_mode=False)

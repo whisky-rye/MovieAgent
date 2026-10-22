@@ -8,7 +8,7 @@
 融合后再叠加与原 fuse 一致的质量分/偏好分，使融合信号与「高分/偏好优先」同日而语，
 并最终仍过 MMR / 可选 LLM 精排（见 rerank）。v2.14 由 config.FUSION_STRATEGY 切换。
 """
-from retrieval.candidates import Candidate
+from retrieval.candidates import Candidate, work_key, merge_candidate
 from ranker.scorer import _as_dict, _quality_pref, _feedback_term
 
 # 顶层召回 dict 的 key（graph 规划名）映射到规范来源权重键，
@@ -19,6 +19,7 @@ _PLAN_TO_CANON = {
     "search_similar": "content",   # 内部已融合 content+relation+graph
     "similar": "content",          # graph 顶层 similar 也是已融合列表
     "search_graph": "graph",       # 知识图谱多跳召回（F1/O12）
+    "search_prod": "prod",         # 生产库只读通道补充召回（E4/MCP，默认关闭）
     "high_quality_board": "coldstart",
     "coldstart_fallback": "coldstart",
 }
@@ -57,7 +58,8 @@ def rrf_fuse(
 
     rrf: dict[str, float] = {}
     sources: dict[str, list[str]] = {}
-    best: dict[str, Candidate] = {}
+    best: dict[str, Candidate] = {}      # wk -> 代表候选
+    wkid: dict[str, str] = {}            # wk -> 代表候选 id（跨源归并后可能变化）
     ranks: dict[str, dict[str, int]] = {}
 
     for src_key, cands in recall.items():
@@ -65,13 +67,22 @@ def rrf_fuse(
         for rank, c in enumerate(cands, start=1):
             if not c.id:
                 continue
-            rrf[c.id] = rrf.get(c.id, 0.0) + w_src / (k + rank)
-            ranks.setdefault(c.id, {})[src_key] = rank
-            if c.id not in best:
-                best[c.id] = c
+            wk = work_key(c)
+            rrf[wk] = rrf.get(wk, 0.0) + w_src / (k + rank)
+            r = ranks.setdefault(wk, {})
+            r[src_key] = min(r.get(src_key, rank), rank) if src_key in r else rank
+            if wk not in best:
+                best[wk] = c
+                wkid[wk] = c.id
+            else:
+                rep = best[wk]
+                old_id = rep.id
+                merge_candidate(rep, c)   # 合并双源外链 id / 异名，展示字段择优
+                if rep.id != old_id:
+                    wkid[wk] = rep.id
             rs = c.recall_source or ""
-            if rs and rs not in sources.get(c.id, []):
-                sources.setdefault(c.id, []).append(rs)
+            if rs and rs not in sources.get(wk, []):
+                sources.setdefault(wk, []).append(rs)
 
     if not rrf:
         return [] if not explain else ([], {})
@@ -79,17 +90,18 @@ def rrf_fuse(
     max_rrf = max(rrf.values())
     merged: dict[str, Candidate] = {}
     emap: dict[str, dict] = {}
-    for cid, raw in rrf.items():
+    for wk, raw in rrf.items():
         base = (raw / max_rrf) if max_rrf else 0.0   # 归一化到 [0,1]
-        c = best[cid]
+        cid = wkid.get(wk, wk)
+        c = best[wk]
         quality, pref = _quality_pref(c, user_genres)
         d = _as_dict(c)
         d["score"] = base + quality + pref + _feedback_term(c, feedback_profile)
-        d["recall_source"] = "|".join(sources.get(cid, [])) or (c.recall_source or "")
+        d["recall_source"] = "|".join(sources.get(wk, [])) or (c.recall_source or "")
         merged[cid] = Candidate(**d)
         emap[cid] = {
-            "sources": sources.get(cid, []),
-            "ranks": ranks.get(cid, {}),
+            "sources": sources.get(wk, []),
+            "ranks": ranks.get(wk, {}),
             "rrf_raw": round(raw, 6),
             "rrf_norm": round(base, 4),
             "quality": round(quality, 4),

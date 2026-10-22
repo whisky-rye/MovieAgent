@@ -1,15 +1,20 @@
 """Agent 工具集（LangChain 工具面）。
 
-前 3 个是对接召回层的「检索工具」，返回紧凑可读摘要；同时暴露 RUNNERS 注册表，
+前若干个是对接召回层的「检索工具」，返回紧凑可读摘要；同时暴露 RUNNERS 注册表，
 供 LangGraph 节点直接取 Candidate 列表做多路融合（避免字符串回解的脆弱）。
-后 2 个：偏好记忆写入、RAG 解释。
+另含偏好记忆写入、RAG 解释，以及生产库只读通道（search_prod，默认关闭）。
 """
+import logging
+
 from langchain_core.tools import tool
 from retrieval.candidates import Candidate
 from retrieval import content_recall, relation_recall, coldstart_recall
 from ranker import rerank
 from agent.memory import get_memory_store
 from graph.recall import graph_recall, graph_recall_by_entity
+from config.settings import settings
+
+logger = logging.getLogger("movie_agent.tools")
 
 
 def _fmt(cands: list[Candidate], label: str) -> str:
@@ -69,6 +74,16 @@ def search_by_person(name: str, top_k: int = 10) -> str:
 
 
 @tool
+def search_prod(query: str, top_k: int = 10) -> str:
+    """在生产库（豆瓣/IMDb 全量）按标题检索影片——补充/校验通道，用于长尾补齐。
+    仅当 MCP_ENABLED=true 且远端可达时生效；🔴 只读，绝不写入生产库。"""
+    if not settings.MCP_ENABLED:
+        return "[生产库只读] 通道未启用（MCP_ENABLED=false）"
+    cands = _run_search_prod({"query": query}, {}, top_k=top_k)
+    return _fmt(cands, "生产库只读")
+
+
+@tool
 def remember_preference(user_id: str, genres: list = None, note: str = None) -> str:
     """记录用户偏好（喜欢的类型或备注），用于后续推荐加权。"""
     prefs = get_memory_store().add_pref(user_id, genres=genres, note=note)
@@ -115,6 +130,37 @@ def _run_search_graph(item_id: str, top_k: int = 20) -> list[Candidate]:
     return graph_recall(item_id, top_k=top_k)
 
 
+def _run_search_prod(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:
+    """生产库只读通道召回（补充/校验路，默认关闭）。
+
+    - 仅在 `MCP_ENABLED=true` 且远端可达时产出候选；否则返回空列表（等价于该路不存在）。
+    - 远端仅执行 SELECT（护栏 + 会话只读 + 限流 + 熔断），绝不写入。
+    - 产出的 Candidate 携带 imdb_id/douban_id，可与本地召回做跨源归并（work_key）。
+    """
+    if not settings.MCP_ENABLED:
+        return []
+    query = (slots.get("query") or "").strip()
+    if not query:
+        return []
+    try:
+        from mcp_prod.client import get_prod_channel
+
+        channel = get_prod_channel()
+        if not channel.is_available():
+            return []
+        cands = channel.search_movie(query, source="douban", limit=top_k) or []
+        # 双源各查一轮：豆瓣给中文名与评分，IMDb 给英文名与评分（跨源归并后只出一条）
+        if top_k > len(cands):
+            cands += (channel.search_movie(query, source="imdb",
+                                           limit=top_k - len(cands)) or [])
+        for c in cands:
+            c.recall_source = "prod"
+        return cands[:top_k]
+    except Exception:  # noqa: BLE001 - 补充通道异常绝不阻断主链路
+        logger.warning("生产库只读通道召回失败（忽略，降级本地召回）", exc_info=True)
+        return []
+
+
 def _run_board(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:
     g = slots.get("genres") or prefs.get("genres")
     return coldstart_recall(
@@ -129,6 +175,7 @@ RUNNERS = {
     "search_by_text": _run_search_by_text,
     "search_similar": _run_search_similar,
     "search_graph": _run_search_graph,
+    "search_prod": _run_search_prod,
     "high_quality_board": _run_board,
 }
 
@@ -136,5 +183,5 @@ RUNNERS = {
 def get_tools():
     """返回 LangChain 工具（供交互式 tool-calling 使用）。"""
     return [search_by_text, search_similar, search_graph, search_by_person,
-            high_quality_board, remember_preference,
+            search_prod, high_quality_board, remember_preference,
             explain_recommendation]

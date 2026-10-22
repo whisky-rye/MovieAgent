@@ -32,6 +32,7 @@ from api.routes.export import router as export_router  # 会话历史导出（zi
 from api.routes.share import router as share_router  # G-Share：会话共享 / 公开只读查看
 from api.routes.poster import router as poster_router  # G-Poster：Top3 宣传海报查询/下载
 from api.routes.feedback import router as feedback_router  # O11：用户反馈采集
+from api.routes.metrics import router as metrics_router  # E4/O18：监控看板 / Prometheus / 告警
 from api.deps import get_current_user, CurrentUser  # G1：鉴权依赖（注入 user_id）
 from api.cors import cors_enforce  # O7/E5：CORS 生产白名单硬拦截
 from agent.session_store import get_session_store  # G3：会话落库
@@ -50,10 +51,13 @@ from agent.memory import get_memory_store
 from agent.guardrail import check_guardrail
 from agent.poster import schedule_poster  # G-Poster：对话完成后异步生成 Top3 宣传海报
 from config.settings import settings
+from observability.metrics import metrics
+from observability.alerting import run_alert_loop
 
 setup_logging()  # 集中式结构化日志（JSON 行 + 滚动文件 + 专用 llm_calls.log）
 _LS_ENABLED = setup_langsmith()  # P4.4：LangSmith 全链路追踪（按开关写入环境变量；缺 Key 自动退化关闭）
 logger_api = logging.getLogger("movie_agent.api")
+metrics.set_enabled(settings.METRICS_ENABLED)  # E4/O18：指标埋点总开关
 
 
 def validate_security_config() -> None:
@@ -88,6 +92,12 @@ def validate_security_config() -> None:
 @asynccontextmanager
 async def lifespan(app):  # noqa: ANN201
     validate_security_config()  # 启动即校验，不合规直接失败（fail-fast）
+    # E4/O18：启动后台告警评估循环（按 ALERT_EVAL_INTERVAL 周期评估并推送告警）
+    if settings.METRICS_ENABLED:
+        try:
+            run_alert_loop()
+        except Exception as e:  # noqa: BLE001
+            logger_api.warning("启动告警循环失败（忽略）：%s", e)
     yield
 
 
@@ -158,6 +168,7 @@ app.include_router(share_router)
 # G-Poster：Top3 宣传海报查询/下载（GET，CSRF 中间件天然豁免）
 app.include_router(poster_router)
 app.include_router(feedback_router)
+app.include_router(metrics_router)  # E4/O18：/metrics / /admin/stats / /admin/dashboard / /admin/alerts
 
 
 @app.middleware("http")
@@ -182,6 +193,15 @@ async def log_http_requests(request: Request, call_next):
     # 初始化 request.state.user_id（供鉴权依赖/日志使用；鉴权模式下会被 token 内的权威值覆盖）
     if not hasattr(request.state, "user_id"):
         request.state.user_id = "default"
+    # E4/O18：指标埋点（HTTP 请求数 / 延迟分位 / 错误率）
+    try:
+        bucket = f"{response.status_code // 100}xx"
+        metrics.incr("http_requests_total", 1, {"path": request.url.path, "status": bucket})
+        metrics.observe("http_request_duration_ms", latency_ms, {"path": request.url.path})
+        if response.status_code >= 500:
+            metrics.incr("http_errors_total", 1, {"path": request.url.path, "status": "5xx"})
+    except Exception:  # noqa: BLE001 - 埋点失败绝不阻断主链路
+        pass
     extra = {"event": "http_request", "method": request.method, "path": request.url.path,
              "status_code": response.status_code,
              "client": request.client.host if request.client else "-",
@@ -256,6 +276,7 @@ def _candidate_to_dict(c: Candidate) -> dict:
         "score": round(c.score, 4),
         "douban_id": c.douban_id or "",
         "imdb_id": c.imdb_id or "",
+        "title_alt": c.title_alt or "",
     }
 
 
@@ -275,6 +296,7 @@ def _dict_to_candidate(d: dict) -> Candidate:
         score=float(d.get("score") or 0.0),
         douban_id=d.get("douban_id") or "",
         imdb_id=d.get("imdb_id") or "",
+        title_alt=d.get("title_alt") or "",
     )
 
 
@@ -362,6 +384,7 @@ def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[st
 
     g = check_guardrail(query)
     if g.action != "allow":
+        metrics.incr("guardrail_block_total", 1, {"action": g.action, "category": g.category})
         logger_api.warning(
             "guardrail 拦截（不进 Agent、不耗额度）",
             extra={"event": "guardrail", "action": g.action, "category": g.category,
@@ -467,6 +490,7 @@ def recommend(
             "cache_backend": cache.backend(), "intent": out.get("intent"),
             "count": out.get("count")},
         )
+        metrics.incr("recommend_cache_hit_total", 1, {"type": "exact"})
         return out
 
     # O8：语义近义命中——复用候选列表，按新 query 重生成解说（用户确认「仅复用候选 items」）
@@ -484,6 +508,7 @@ def recommend(
                 "cache_backend": cache.backend(), "intent": out.get("intent"),
                 "count": out.get("count")},
             )
+            metrics.incr("recommend_cache_hit_total", 1, {"type": "semantic_exact"})
             return out
         # 近义：复用候选，重跑 LLM 生成与新 query 一致的解说
         try:
@@ -511,6 +536,7 @@ def recommend(
         # 把本次 (query, 重生成结果) 落精确缓存 + 索引，后续同 query 直接精确命中
         cache.set(ck, resp)
         get_sem_cache().index_query(req.query, auth.user_id, req.top_k, resp)
+        metrics.incr("recommend_cache_hit_total", 1, {"type": "semantic_near"})
         logger_api.info(
             "recommend 语义命中(近义复用候选)", extra={"event": "recommend", "user_id": auth.user_id,
             "request_id": request.state.request_id, "cached": True, "semantic": True,
@@ -522,13 +548,14 @@ def recommend(
     t0 = time.time()
     try:
         state = _run(req.query, auth.user_id, request_id=request_id, session_id=req.session_id)
-    except RateLimited as e:  # 限流触发：标准 429 + Retry-After
+    except RateLimited as e:  # 限流触发：标准 429 + Retry-After（埋点已在限流器内统一计数）
         raise HTTPException(
             status_code=429,
             detail="请求过于频繁，请稍后再试（rate limit）",
             headers={"Retry-After": str(max(1, int(e.retry_after)))},
         )
     except _Overloaded:  # 并发槽耗尽：过载 503
+        metrics.incr("overloaded_total", 1, {"endpoint": "recommend"})
         logger_api.warning(
             "recommend 过载（并发槽耗尽）", extra={"event": "overloaded", "user_id": auth.user_id,
             "request_id": request_id, "concurrency": settings.MAX_CONCURRENT_RUNS},
@@ -654,6 +681,7 @@ async def recommend_stream(
     # 护栏（锁前、不进 Agent）
     g = check_guardrail(req.query)
     if g.action != "allow":
+        metrics.incr("guardrail_block_total", 1, {"action": g.action, "category": g.category})
         logger_api.warning("guardrail 拦截（stream）",
                            extra={"event": "guardrail", "action": g.action,
                                   "category": g.category, "user_id": auth.user_id,
@@ -704,6 +732,7 @@ async def recommend_stream(
             logger_api.warning("recommend/stream 过载（并发槽耗尽）",
                                extra={"event": "overloaded", "user_id": auth.user_id,
                                       "request_id": request_id, "concurrency": settings.MAX_CONCURRENT_RUNS})
+            metrics.incr("overloaded_total", 1, {"endpoint": "recommend/stream"})
             ev_q.put(("error", "服务繁忙，请稍后再试（并发超限）。"))
         except Exception as e:  # noqa: BLE001
             logger_api.exception("recommend/stream 运行异常",

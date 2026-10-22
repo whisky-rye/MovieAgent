@@ -25,13 +25,14 @@ from contextlib import contextmanager
 import pymysql
 
 # ---------------------------------------------------------------------------
-# 连接配置（PROD 只读）。默认值即用户提供的生产实例凭据；生产环境应通过环境变量注入，
-# 且强烈建议改用「仅 SELECT」权限的专用只读账号，避免 root 直连。
+# 连接配置（PROD 只读）。凭据**仅从环境变量注入**，脚本内不保留任何密码默认值
+# （历史版本硬编码过 root 密码，已迁出到 .env / 部署环境变量）。
+# 生产环境强烈建议改用「仅 SELECT」权限的专用只读账号，避免 root 直连。
 # ---------------------------------------------------------------------------
-HOST = os.getenv("PROD_DB_HOST", "<PROD_DB_HOST>")
-PORT = int(os.getenv("PROD_DB_PORT", "3306"))
-USER = os.getenv("PROD_DB_USER", "root")
-PASS = os.getenv("PROD_DB_PASS", "!@$G3ad4gjD%3u5$^@75io7%$&67SJ")
+HOST = os.getenv("PROD_DB_HOST") or os.getenv("MCP_DB_HOST") or ""
+PORT = int(os.getenv("PROD_DB_PORT") or os.getenv("MCP_DB_PORT") or "3306")
+USER = os.getenv("PROD_DB_USER") or os.getenv("MCP_DB_USER") or ""
+PASS = os.getenv("PROD_DB_PASS") or os.getenv("MCP_DB_PASSWORD") or ""
 
 IMDB_DB = os.getenv("PROD_IMDB_DB", "imdb")    # 仅读 imdb_* 表
 DOUBAN_DB = os.getenv("PROD_DOUBAN_DB", "imdb2")  # 仅读 douban_* 表
@@ -43,6 +44,11 @@ DATA_DIR = os.path.abspath(
 
 def _connect(db: str):
     """建立只读连接。仅用于 SELECT，不做任何写操作。"""
+    if not (HOST and USER and PASS):
+        raise RuntimeError(
+            "未配置生产库只读凭据：请设置 PROD_DB_HOST/PROD_DB_USER/PROD_DB_PASS"
+            "（或 MCP_DB_*）环境变量，不要把密码写进代码。"
+        )
     return pymysql.connect(
         host=HOST, port=PORT, user=USER, password=PASS, database=db,
         charset="utf8mb4", connect_timeout=15, read_timeout=180, write_timeout=180,

@@ -20,3 +20,6 @@ qdrant-client>=1.7
 pymilvus>=2.4
 milvus-lite>=2.4
 requests>=2.31
+# MCP 接入（生产库只读通道，docs/MCP集成可行性调研报告.md）
+# 2.x 起 FastMCP 更名为 MCPServer：from mcp.server.mcpserver import MCPServer
+mcp>=2.0,<3

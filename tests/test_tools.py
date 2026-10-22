@@ -1,8 +1,8 @@
 """Agent 工具层（agent/tools.py）单测。
 
 验证：
-- RUNNERS 注册表含 4 个检索 runner（含知识图谱 search_graph）且均为可调用；
-- get_tools 返回 7 个 LangChain 工具（含 search_graph / search_by_person）；
+- RUNNERS 注册表含 5 个检索 runner（含知识图谱 search_graph、生产库只读 search_prod）且均为可调用；
+- get_tools 返回 8 个 LangChain 工具（含 search_graph / search_by_person / search_prod）；
 - _run_search_similar 融合 content + relation + graph 召回并走 rerank；
 - _run_search_by_text 把 slots / prefs 透传给 content_recall（含类型/国家/年份过滤）。
 用 monkeypatch 隔离真实向量库 / 数据库。
@@ -19,7 +19,7 @@ from retrieval.candidates import Candidate
 
 def test_runners_registry():
     assert set(tools.RUNNERS.keys()) == {
-        "search_by_text", "search_similar", "search_graph",
+        "search_by_text", "search_similar", "search_graph", "search_prod",
         "high_quality_board",
     }
     for fn in tools.RUNNERS.values():
@@ -27,7 +27,7 @@ def test_runners_registry():
 
 
 def test_get_tools_count():
-    assert len(tools.get_tools()) == 7
+    assert len(tools.get_tools()) == 8
 
 
 def test_run_search_similar_fuses():
@@ -45,6 +45,8 @@ def test_run_search_similar_fuses():
             "content", "relation", "graph"}
     assert out is fake_ranked
 
+
+def test_run_search_prod_disabled_returns_empty():
     """生产库只读通道默认关闭 → 该路召回为空（不影响主链路）。"""
     import config.settings as cs
     old = cs.settings.MCP_ENABLED
@@ -54,6 +56,8 @@ def test_run_search_similar_fuses():
     finally:
         cs.settings.MCP_ENABLED = old
 
+
+def test_run_search_prod_never_raises():
     """生产库通道异常绝不冒泡到主链路（降级为空召回）。"""
     import config.settings as cs
     old = cs.settings.MCP_ENABLED
