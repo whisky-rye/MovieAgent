@@ -68,6 +68,44 @@ class MemoryStore(ABC):
         d.setdefault("history", []).append(item)
         self.save(user_id, d)
 
+    def sediment_preferences(
+        self, user_id: str, *,
+        genres: list[str] | None = None,
+        directors: list[str] | None = None,
+        actors: list[str] | None = None,
+        people: list[str] | None = None,
+        note: str | None = None,
+        history_item: dict | None = None,
+    ) -> dict:
+        """G4 自动沉淀：把本轮抽取到的结构化偏好合并进画像（去重），并可选追加一条历史。
+
+        - genres/directors/actors/people 各自去重合并进 preferences 对应列表；
+        - note 覆盖写（latest wins）；
+        - history_item 非 None 时追加到 history（避免无限膨胀由调用方控制频率）；
+        - 复用 load/save，子类（MySQL/内存）无需各自实现。
+        """
+        d = self.load(user_id)
+        prefs = d.setdefault("preferences", {})
+
+        def _merge(key: str, vals) -> None:
+            if not vals:
+                return
+            cur = prefs.setdefault(key, [])
+            for v in vals:
+                if v and v not in cur:
+                    cur.append(v)
+
+        _merge("genres", genres)
+        _merge("directors", directors)
+        _merge("actors", actors)
+        _merge("people", people)
+        if note:
+            prefs["note"] = note
+        if history_item:
+            d.setdefault("history", []).append(history_item)
+        self.save(user_id, d)
+        return prefs
+
 
 class MySQLMemoryStore(MemoryStore):
     """偏好记忆的强 MySQL 后端：落 `movie_agent.user_preferences` 表（与 imdb 语料库隔离）。

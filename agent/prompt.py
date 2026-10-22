@@ -17,14 +17,16 @@ SYSTEM_PROMPT = """你是一个「影片推荐智能体」，基于本地 IMDb+�
 INTENT_PROMPT = """你是意图解析器。把用户的话解析为 JSON。
 只输出 JSON，不要解释，不要包含 <think> 标签。
 字段：
-- intent: 枚举之一 —— "recommend"(按描述推荐) / "similar"(找某作品的相似) / "board"(高分榜单) / "explain"(解释某片) / "preference"(记住偏好)
+- intent: 枚举之一 —— "recommend"(按描述推荐) / "similar"(找某作品的相似) / "board"(高分榜单) / "explain"(解释某片) / "preference"(记住偏好) / "by_person"(按导演/演员找其作品，如"诺兰的电影""周星驰演的")
 - query: 用于内容召回的自然语言描述（可为空）
+- name: by_person 意图时的人名（如 "诺兰"；无则 ""）
 - genres: 类型列表（如 ["科幻","悬疑"]，无则 []）
 - country: 国家/地区过滤（无则 ""）
 - min_year: 最早年份（无则 0）
 - item_hint: 用户提到的作品名（similar/explain 用，无则 ""）
 字段全部为小写 key。示例：
-{"intent":"recommend","query":"太空科幻 孤独感","genres":["科幻"],"country":"","min_year":0,"item_hint":""}
+{"intent":"recommend","query":"太空科幻 孤独感","name":"","genres":["科幻"],"country":"","min_year":0,"item_hint":""}
+{"intent":"by_person","query":"诺兰的电影","name":"诺兰","genres":[],"country":"","min_year":0,"item_hint":""}
 """
 
 EXPLAIN_PROMPT = """你是推荐解说员。基于下面的「检索到的候选作品」为用户生成推荐语。

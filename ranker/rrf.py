@@ -19,6 +19,7 @@ _PLAN_TO_CANON = {
     "search_similar": "content",   # 内部已融合 content+relation+graph
     "similar": "content",          # graph 顶层 similar 也是已融合列表
     "search_graph": "graph",       # 知识图谱多跳召回（F1/O12）
+    "search_by_person": "person",  # 按导演/演员找作品（实体中心召回）
     "search_prod": "prod",         # 生产库只读通道补充召回（E4/MCP，默认关闭）
     "high_quality_board": "coldstart",
     "coldstart_fallback": "coldstart",

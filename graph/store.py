@@ -28,6 +28,7 @@ from graph.schema import (
     ENTITY_GENRE,
     ENTITY_COUNTRY,
 )
+from retrieval.candidates import Candidate, split_genres
 
 logger = logging.getLogger("movie_agent.graph.store")
 
@@ -239,6 +240,48 @@ class KnowledgeGraphStore:
     def search_person(self, name: str, limit: int = 5) -> list[str]:
         """按人名检索人物 key（实体中心召回入口）。"""
         return self._f.search_person(name, limit=limit)
+
+    def person_filmography(self, name: str, top_k: int = 20) -> list:
+        """按人名取「其本人作品集」（导演/编剧/卡司直接署名的影片），返回 GraphHit 列表。
+
+        与 graph_recall_by_entity 的区别：不做多跳合作网络扩展，只返回该人署名的作品，
+        更贴合「X 导演/演员的作品」这类意图；且**无 GRAPH_ENABLED 依赖**（仅用 fetcher，
+        即便图谱遍历被关闭也能返回人物作品集）。
+        """
+        from graph.schema import GraphHit
+
+        if not name or not name.strip():
+            return []
+        pkeys = self._f.search_person(name.strip(), limit=5)
+        if not pkeys:
+            return []
+        item_ids: list[str] = []
+        seen: set[str] = set()
+        for pk in pkeys:
+            for rel in self._person_relations(pk):
+                obj = rel.obj
+                if (obj.startswith("douban:") or obj.startswith("imdb:")) and obj not in seen:
+                    seen.add(obj)
+                    item_ids.append(obj)
+        if not item_ids:
+            return []
+        meta = self._f.movie_meta(item_ids)
+        hits: list = []
+        for iid in item_ids:
+            m = meta.get(iid)
+            if not m or not m.get("title"):
+                continue
+            score = 0.6 + 0.4 * min(max(m["rating"], 0), 10) / 10.0
+            hits.append(GraphHit(
+                item_id=iid, source=m["source"], title=m["title"], year=m["year"],
+                genres=[g for g in m["genres"].replace("|", "/").split("/") if g.strip()],
+                country=m["country"], rating=m["rating"], rating_count=m["rating_count"],
+                score=score, douban_id=m.get("douban_id", "") or "",
+                imdb_id=m.get("imdb_id", "") or "",
+                paths=[f"人物:{name.strip()} → 署名 → 《{m['title']}》"],
+            ))
+        hits.sort(key=lambda h: h.score, reverse=True)
+        return hits[:top_k]
 
     def _neighbors(self, key: str) -> list[Relation]:
         if key in self._cache:

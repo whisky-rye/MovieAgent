@@ -14,6 +14,7 @@ import json
 import logging
 import time
 import re
+from datetime import datetime, timezone
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 
@@ -70,7 +71,7 @@ def _new_step(state: AgentState, node: str, kind: str, summary: str,
 
 
 # 召回来源 → 中文标签（用于融合可解释步骤的可读展示）
-_SRC_CN = {"content": "内容", "relation": "关系", "coldstart": "冷启动"}
+_SRC_CN = {"content": "内容", "relation": "关系", "coldstart": "冷启动", "person": "人物"}
 
 
 def _fmt_fusion_explain(fusion_detail: dict, ranked: list, n: int = 5) -> list[str]:
@@ -126,10 +127,13 @@ def _parse_intent(state: AgentState) -> AgentState:
     if not slots:
         slots = _heuristic(query)
     intent = slots.get("intent", "recommend")
-    if intent not in ("recommend", "similar", "board", "explain", "preference"):
+    if intent not in ("recommend", "similar", "board", "explain", "preference", "by_person"):
         intent = "recommend"
+    # by_person：人名兜底（LLM 误判为 recommend 时矫正）
+    if intent == "recommend" and _looks_like_person_query(query):
+        intent = "by_person"
     # 关键词矫正：即便 LLM 误判，命中偏好语也归为 preference
-    if intent != "preference" and ("记一下" in query or "记住" in query
+    if intent not in ("preference", "by_person") and ("记一下" in query or "记住" in query
                                     or ("我" in query and "喜欢" in query)
                                     or "我的偏好" in query or "偏好" in query):
         intent = "preference"
@@ -146,10 +150,20 @@ def _parse_intent(state: AgentState) -> AgentState:
             "thinking": {"route": thinking}, "steps": [step]}
 
 
+def _looks_like_person_query(query: str) -> bool:
+    """启发式：是否像「按导演/演员找作品」类 query（诺兰的电影 / 周星驰演的 / X 执导）。"""
+    if not query:
+        return False
+    return bool(re.search(r"(导演|演过|演的|执导|拍[过的]?|的作品|拍的电影|导的|编剧)", query)) \
+        or bool(re.search(r"[\u4e00-\u9fa5]{2,4}(的电影|的作品|演的|拍的|导的)", query))
+
+
 def _heuristic(query: str) -> dict:
     q = query.lower()
     if any(k in query for k in ("类似", "相似", "像", "like")):
         return {"intent": "similar", "query": query, "genres": [], "country": "", "min_year": 0, "item_hint": query}
+    if _looks_like_person_query(query):
+        return {"intent": "by_person", "query": query, "name": query, "genres": [], "country": "", "min_year": 0, "item_hint": ""}
     if any(k in q for k in ("高分", "榜单", "排行", "board", "top")):
         return {"intent": "board", "query": query, "genres": [], "country": "", "min_year": 0, "item_hint": ""}
     if "偏好" in query or ("记" in query and "喜欢" in query):
@@ -163,6 +177,82 @@ def _resolve_item_id(title: str) -> str | None:
         return cands[0].id if cands else None
     except Exception:
         return None
+
+
+def _extract_prefs_llm(query: str) -> dict:
+    """用轻量模型从用户原话抽取结构化偏好（类型/导演/演员/备注）。失败返回 {}。
+
+    作为 G4 自动沉淀的「抽取器」：不依赖 LLM 主动调用 remember_preference 工具，
+    每轮推荐后自动跑一次，把显式偏好稳定写入 user_preferences（与手动工具共用同一张表）。
+    """
+    if not query or not query.strip():
+        return {}
+    try:
+        llm = chat_light(user_id="system", request_id="pref-extract")
+        prompt = (
+            "你是偏好抽取器。从用户这句话提取观影偏好，只输出 JSON（不要解释、不要<think>）。\n"
+            '字段：genres(类型数组，如["科幻","悬疑"])、directors(导演名数组)、'
+            'actors(演员名数组)、note(一句话备注，无则"")。\n'
+            '示例：{"genres":["科幻"],"directors":["诺兰"],"actors":[],"note":"喜欢烧脑"}'
+        )
+        resp = llm.invoke([HumanMessage(content=prompt + "\n用户：" + query)])
+        return _extract_json(strip_think(resp.content)) or {}
+    except Exception as exc:  # 抽取失败不应阻断主流程
+        logger.warning("偏好抽取失败（跳过自动沉淀）: %s", exc)
+        return {}
+
+
+def _sediment_preferences(state: AgentState) -> None:
+    """G4 自动沉淀：每轮推荐后把结构化偏好写入 user_preferences（合并去重 + 追加历史）。
+
+    - 类型偏好：优先取意图 slots.genres，再补 LLM 抽取的类型；
+    - 人物偏好：by_person 意图时把人名写入 prefs.people；LLM 抽取到的导演/演员分别入表；
+    - 历史：追加一条 {ts, intent, query, top_title} 便于后续回顾与画像演进；
+    - 仅对真实登录用户（非 default/tool）生效，避免污染匿名画像；
+    - 任何异常静默忽略，绝不阻断主流程。
+    """
+    uid = state.get("user_id", "default")
+    if uid in ("default", "tool", ""):
+        return
+    intent = state.get("intent")
+    query = state.get("query", "")
+    slots = state.get("slots", {}) or {}
+    ranked = state.get("ranked", []) or []
+
+    genres = list(slots.get("genres") or [])
+    llm_prefs = _extract_prefs_llm(query)
+    genres += (llm_prefs.get("genres") or [])
+    directors = llm_prefs.get("directors") or []
+    actors = llm_prefs.get("actors") or []
+    people = []
+    if intent == "by_person":
+        name = (slots.get("name") or query).strip()
+        if name:
+            people.append(name)
+    note = llm_prefs.get("note") or None
+
+    if not (genres or directors or actors or people or note):
+        return
+
+    top = ranked[0] if ranked else None
+    history_item = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "intent": intent,
+        "query": query,
+        "top_title": getattr(top, "title", None),
+    }
+    try:
+        get_memory_store().sediment_preferences(
+            uid,
+            genres=genres or None,
+            directors=directors or None,
+            actors=actors or None,
+            people=people or None,
+            note=note,
+            history_item=history_item,
+        )
+    except Exception as exc:  # 沉淀失败不影响推荐
+        logger.warning("偏好自动沉淀失败（忽略）: %s", exc)
 
 
 def _plan(state: AgentState) -> AgentState:
@@ -181,6 +271,10 @@ def _plan(state: AgentState) -> AgentState:
         plan = ["high_quality_board"]
     elif intent == "preference":
         plan = []
+    elif intent == "by_person":
+        # 人名兜底：确保 runner 能拿到人名（LLM 可能填在 query 或 name）
+        slots["name"] = slots.get("name") or slots.get("query") or query
+        plan = ["search_by_person"]
     else:  # recommend / explain -> 内容召回为主
         plan = ["search_by_text"]
     elapsed = int((time.time() - t0) * 1000)
@@ -332,6 +426,9 @@ def _generate(state: AgentState) -> AgentState:
     meta = build_source_meta(ranked)
     if meta.get("blocks"):
         answer = answer + source_one_liner(meta)
+    # G4 自动沉淀：每轮推荐后把结构化偏好写入 user_preferences（preference 意图已在上方单独写，避免重复）
+    if intent != "preference":
+        _sediment_preferences(state)
     # thinking 合并（route 步骤已在 state.thinking 中，此处补 generate）
     th = dict(state.get("thinking") or {})
     th["generate"] = gen_thinking

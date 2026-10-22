@@ -11,7 +11,7 @@ from retrieval.candidates import Candidate
 from retrieval import content_recall, relation_recall, coldstart_recall
 from ranker import rerank
 from agent.memory import get_memory_store
-from graph.recall import graph_recall, graph_recall_by_entity
+from graph.recall import graph_recall, graph_recall_by_entity, person_recall
 from config.settings import settings
 
 logger = logging.getLogger("movie_agent.tools")
@@ -67,10 +67,9 @@ def search_graph(item_id: str, top_k: int = 10) -> str:
 
 @tool
 def search_by_person(name: str, top_k: int = 10) -> str:
-    """以人物名（导演/演员）为中心召回其作品与合租网络（知识图谱实体召回）。
-    例如「诺兰」「小李子」。"""
-    cands = graph_recall_by_entity(name, top_k=top_k)
-    return _fmt(cands, "人物图谱")
+    """按导演/演员查找其本人作品集（如「诺兰」「周星驰」）。返回该人署名的电影/剧集列表。"""
+    cands = _run_search_by_person({"name": name, "query": name}, {}, top_k=top_k)
+    return _fmt(cands, "人物作品集")
 
 
 @tool
@@ -130,6 +129,23 @@ def _run_search_graph(item_id: str, top_k: int = 20) -> list[Candidate]:
     return graph_recall(item_id, top_k=top_k)
 
 
+def _run_search_by_person(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:
+    """按人物（导演/演员）召回其本人作品集。
+
+    - 直接用 graph.person_recall（底层 KnowledgeGraphStore.person_filmography，
+      仅走 fetcher，不依赖 GRAPH_ENABLED，即便图谱遍历关闭也能返回人物作品集）。
+    - 异常不影响主链路，降级为空列表。
+    """
+    name = (slots.get("name") or slots.get("query") or "").strip()
+    if not name:
+        return []
+    try:
+        return person_recall(name, top_k=top_k)
+    except Exception:  # noqa: BLE001 - 补充通道异常绝不阻断主链路
+        logger.warning("按人物召回失败（忽略，降级本地召回）", exc_info=True)
+        return []
+
+
 def _run_search_prod(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:
     """生产库只读通道召回（补充/校验路，默认关闭）。
 
@@ -175,6 +191,7 @@ RUNNERS = {
     "search_by_text": _run_search_by_text,
     "search_similar": _run_search_similar,
     "search_graph": _run_search_graph,
+    "search_by_person": _run_search_by_person,
     "search_prod": _run_search_prod,
     "high_quality_board": _run_board,
 }

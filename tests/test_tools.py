@@ -19,8 +19,8 @@ from retrieval.candidates import Candidate
 
 def test_runners_registry():
     assert set(tools.RUNNERS.keys()) == {
-        "search_by_text", "search_similar", "search_graph", "search_prod",
-        "high_quality_board",
+        "search_by_text", "search_similar", "search_graph", "search_by_person",
+        "search_prod", "high_quality_board",
     }
     for fn in tools.RUNNERS.values():
         assert callable(fn)

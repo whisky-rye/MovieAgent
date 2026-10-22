@@ -233,7 +233,7 @@ class Settings(BaseSettings):
     # （避免「同剧组」关系召回过强）。格式 key:value 逗号分隔；仅作相对偏置，可省略。
     # graph：知识图谱多跳召回（F1/O12），与 relation 同源但覆盖更广（多跳+类型/地区），权重略低于 relation。
     # prod ：生产库只读通道补充召回（MCP），默认关闭（MCP_ENABLED=false 时该路无产出），权重最低。
-    RRF_WEIGHTS: str = "content:1.0,relation:0.8,coldstart:0.6,graph:0.7,prod:0.5"
+    RRF_WEIGHTS: str = "content:1.0,relation:0.8,coldstart:0.6,graph:0.7,person:0.9,prod:0.5"
 
     # ---- 二级重排 pipeline（P2/P3 配置化） ----
     # 融合后是否做 MMR 多样性重排（避免清一色同类型）；默认开，等价原 strategy='mmr'

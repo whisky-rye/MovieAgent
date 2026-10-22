@@ -87,3 +87,37 @@ def graph_recall_by_entity(
         expand_country=expand_country if expand_country is not None else settings.GRAPH_EXPAND_COUNTRY,
     )
     return [_hit_to_candidate(h) for h in hits]
+
+
+def person_recall(
+    name: str,
+    top_k: int = 20,
+    store: Optional[KnowledgeGraphStore] = None,
+) -> list[Candidate]:
+    """按导演/演员名召回其作品集（「找某人的作品」意图入口）。
+
+    直接用 KnowledgeGraphStore.person_filmography（仅 fetcher、不依赖 GRAPH_ENABLED），
+    产出 recall_source="person" 的候选，可无缝并入 RRF 融合。
+    """
+    if not name or not name.strip():
+        return []
+    st = store or get_graph_store()
+    hits = st.person_filmography(name.strip(), top_k=top_k)
+    out: list[Candidate] = []
+    for h in hits:
+        out.append(Candidate(
+            id=h.item_id,
+            source=h.source,
+            title=h.title,
+            year=h.year,
+            genres=h.genres,
+            country=h.country,
+            rating=h.rating,
+            rating_count=h.rating_count,
+            recall_source="person",
+            score=round(h.score, 6),
+            douban_id=h.douban_id,
+            imdb_id=h.imdb_id,
+            graph_paths=h.paths,
+        ))
+    return out
