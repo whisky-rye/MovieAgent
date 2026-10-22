@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # ---- 新业务库 movie_agent（user / session / preference 等新增表统一落这里，与 imdb 语料库隔离）----
     # host / 账号 / 密码 直接复用上方 IMDB_MYSQL_*（同一 MySQL 实例，仅库名不同）
     MOVIE_AGENT_MYSQL_DB: str = "movie_agent"
+    # 业务库 DSN 显式覆盖（可选）：在 .env 设置 MOVIE_AGENT_MYSQL_DSN_OVERRIDE 可直接指向
+    # 任意业务库（例如部署期把业务库指向远端同实例的 movie_agent），优先级高于下方默认拼装。
+    # 仅影响业务库（user/session/preference/feedback）；语料库 imdb/imdb2 仍走本地 IMDB_MYSQL_*。
+    MOVIE_AGENT_MYSQL_DSN_OVERRIDE: str | None = None
 
     # ---- 前端跨域（G2/O7）：允许的前端源（白名单），逗号分隔 ----
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
@@ -305,7 +309,13 @@ class Settings(BaseSettings):
 
     @property
     def MOVIE_AGENT_MYSQL_DSN(self) -> str:
-        """同步 MySQL DSN，指向 movie_agent 业务库（pymysql 驱动，utf8mb4）。"""
+        """同步 MySQL DSN，指向 movie_agent 业务库（pymysql 驱动，utf8mb4）。
+
+        若 .env 设置了 MOVIE_AGENT_MYSQL_DSN_OVERRIDE 则直接采用（便于把业务库
+        指向远端部署实例，而语料库 imdb 仍留本地，互不干扰）。
+        """
+        if self.MOVIE_AGENT_MYSQL_DSN_OVERRIDE:
+            return self.MOVIE_AGENT_MYSQL_DSN_OVERRIDE
         return (
             f"mysql+pymysql://{self.IMDB_MYSQL_USER}:{self.IMDB_MYSQL_PASS}"
             f"@{self.IMDB_MYSQL_ADDR}/{self.MOVIE_AGENT_MYSQL_DB}?charset=utf8mb4"

@@ -200,6 +200,13 @@ def _aggregate(rows, now: datetime | None = None, half_life_days: int = 30) -> d
     rows: 可迭代的 (signal, genres, item_id, weight, created_at) 元组，须按
           created_at,id 升序（越靠后越新）。
     now 省略时取当前时间（离线单测可显式传入以固定衰减基准）。
+
+    信号权重见模块级 ``_SIGNAL_WEIGHT``（现已真正生效）：
+      - explicit_like / explicit_dislike：显式赞踩 → 加分 / 黑名单（强降权）
+      - click：点击 → 弱加分
+      - impression：已曝光未点 → 弱负（``_SIGNAL_WEIGHT[SIGNAL_IMPRESSION]``），
+        仅对「未显式赞/踩」的作品降权，防反复推已读腻的；
+        不会抹掉显式赞/踩带来的正向分。
     """
     if now is None:
         now = datetime.now()
@@ -212,9 +219,11 @@ def _aggregate(rows, now: datetime | None = None, half_life_days: int = 30) -> d
     for pos, (signal, _g, item_id, _w, _ts) in enumerate(rows):
         if signal in _EXPLICIT_SIGNALS:
             latest_explicit[item_id] = pos
+    explicit_ids = set(latest_explicit.keys())
 
     genre_aff: dict[str, float] = {}
-    item_boost: dict[str, float] = {}
+    pos_boost: dict[str, float] = {}   # 显式赞/点击 正向加分
+    imp_pen: dict[str, float] = {}     # 曝光未点 弱负（仅对未显式互动的作品）
     item_black: dict[str, float] = {}
 
     for pos, (signal, genres, item_id, weight, created_at) in enumerate(rows):
@@ -227,9 +236,18 @@ def _aggregate(rows, now: datetime | None = None, half_life_days: int = 30) -> d
         if signal == SIGNAL_EXPLICIT_DISLIKE:
             item_black[item_id] = ITEM_DISLIKE_PENALTY
         elif signal == SIGNAL_EXPLICIT_LIKE:
-            item_boost[item_id] = max(item_boost.get(item_id, 0.0), ITEM_LIKE_BOOST)
+            pos_boost[item_id] = max(pos_boost.get(item_id, 0.0), ITEM_LIKE_BOOST)
         elif signal == SIGNAL_CLICK:
-            item_boost[item_id] = max(item_boost.get(item_id, 0.0), ITEM_CLICK_BOOST)
+            pos_boost[item_id] = max(pos_boost.get(item_id, 0.0), ITEM_CLICK_BOOST)
+        elif signal == SIGNAL_IMPRESSION:
+            # 已曝光未点：弱负，防反复推；仅对「未显式赞/踩」的作品生效，
+            # 因此不会把用户已赞/点过的作品也一起压下去。
+            if item_id not in explicit_ids:
+                imp_pen[item_id] = (
+                    imp_pen.get(item_id, 0.0)
+                    + _SIGNAL_WEIGHT[SIGNAL_IMPRESSION] * w
+                )
+        # 注：impression 不计入类型亲和度（曝光行通常无 genres，且不表达偏好）
 
         # 类型亲和度：仅显式赞踩携带 genres 才有意义
         if genres and signal in (SIGNAL_EXPLICIT_LIKE, SIGNAL_EXPLICIT_DISLIKE):
@@ -238,6 +256,11 @@ def _aggregate(rows, now: datetime | None = None, half_life_days: int = 30) -> d
                 g = g.strip()
                 if g:
                     genre_aff[g] = max(-1.0, min(1.0, genre_aff.get(g, 0.0) + sgn * w))
+
+    # 合并正向加分与曝光弱负（曝光负分只降权未互动作品，不影响已赞/点）
+    item_boost: dict[str, float] = {}
+    for item_id in set(pos_boost) | set(imp_pen):
+        item_boost[item_id] = pos_boost.get(item_id, 0.0) + imp_pen.get(item_id, 0.0)
 
     return {
         "genre_affinity": genre_aff,
