@@ -16,6 +16,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 
 from agent.auth_crypto import hash_password, issue_token, verify_token
 from agent.user_store import get_user_store
@@ -90,7 +91,13 @@ def register(req: RegisterReq, response: Response):
     salt, pw_hash = hash_password(req.password, iterations=settings.AUTH_PBKDF2_ITERATIONS)
     if store.get(user_id) is not None:  # 极小概率 UUID 碰撞：重生成一次
         user_id = uuid.uuid4().hex
-    store.create(user_id, req.username, salt, pw_hash)
+    try:
+        store.create(user_id, req.username, salt, pw_hash)
+    except IntegrityError:
+        # 并发同名注册：查重与插入两步非原子，输家由 username 主键唯一约束拦住。
+        # 必须返回 409，绝不能覆盖前者账号（P0-4：曾经的 ON DUPLICATE KEY UPDATE
+        # 会把前者 user_id/salt/pw_hash 全部改写，等同账号接管）。
+        raise HTTPException(status_code=409, detail="用户名已存在")
     token = issue_token(user_id, req.username)
     _set_auth_cookies(response, token)
     return {"user_id": user_id, "username": req.username, "token": token}

@@ -48,12 +48,19 @@ class MySQLUserStore:
         logger.info("MySQLUserStore: 已启用 movie_agent.users 作为用户存储（强 MySQL，无 file 兜底）")
 
     def create(self, user_id: str, username: str, salt: str, pw_hash: str) -> None:
+        """新建用户（纯 INSERT，绝不覆盖）。
+
+        username 为主键（唯一约束）：并发同名注册时后到者由数据库抛
+        IntegrityError（路由层转 409），**绝不再静默覆盖他人账号**——
+        此前 `ON DUPLICATE KEY UPDATE user_id/salt/pw_hash 全列覆盖` 会让
+        并发注册的赢家把输家的 user_id/salt/pw_hash 改写掉，导致其 token
+        失效、偏好/会话全部成孤儿数据（等同账号接管）。
+        """
         with self._engine.connect() as c:
             c.execute(
                 text(
                     "INSERT INTO users (username, user_id, salt, pw_hash, created_at) "
-                    "VALUES (:u, :uid, :s, :h, NOW()) "
-                    "ON DUPLICATE KEY UPDATE user_id=:uid, salt=:s, pw_hash=:h, updated_at=NOW()"
+                    "VALUES (:u, :uid, :s, :h, NOW())"
                 ),
                 {"u": username, "uid": user_id, "s": salt, "h": pw_hash},
             )
