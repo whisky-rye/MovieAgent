@@ -3,7 +3,7 @@
 读取本地 .env（含 MySQL 票据等），统一对外暴露配置。
 密钥仅来自环境变量/本地 .env，绝不硬编码、不入仓。
 """
-from typing import List
+from typing import List, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     AUTH_COOKIE_SAMESITE: str = "lax"           # lax：允许同站跨端口（前端 5173 ↔ 后端 8000）携带
     CSRF_COOKIE_NAME: str = "ma_csrf"           # 双提交 CSRF token（非 HttpOnly，供前端 JS 读取）
     CSRF_HEADER_NAME: str = "X-CSRF-Token"      # 前端把 ma_csrf 值放入此请求头，后端校验一致
-    COOKIE_SECURE: bool = False                 # True=仅 HTTPS 传输；生产(HTTPS)自动置 True（见 auth 路由）
+    # None（默认）= 跟随鉴权总开关：AUTH_ENABLED=true → Secure（仅 HTTPS 传输）；
+    # 显式 true/false 可覆盖（如内网 HTTP 联调需显式 false）。
+    COOKIE_SECURE: Optional[bool] = None
 
     # ---- 本地 Ollama（已就绪，仅核对） ----
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"  # Ollama 默认端口（实测含 bge-m3/qwen3.5/deepseek）
@@ -377,3 +379,41 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# ---- 鉴权单开关（P0-1）：AUTH_ENABLED 是整个鉴权功能的唯一总开关 ----
+# 开启（true）：强制 Bearer/Cookie token 鉴权 + CSRF 双提交 + Secure Cookie；
+#              此时 AUTH_SECRET 必须为强密钥，否则拒绝启动（空/弱密钥 ⇒ token 可离线伪造）。
+# 关闭（false）：调试模式（body/query 指定 user_id），仅告警；该模式下 verify_token
+#               不采信任何 token（见 agent/auth_crypto.py），密钥为空也无法伪造身份。
+_WEAK_AUTH_SECRETS = {
+    "", "changeme", "change_me", "secret", "default", "your-secret-here",
+    "password", "test", "123456", "admin",
+}
+MIN_AUTH_SECRET_LEN = 16
+
+
+def validate_auth_config(auth_enabled: bool, auth_secret: str) -> Optional[str]:
+    """鉴权总开关校验（纯函数，可离线单测；启动时由 api/main.py 调用）。
+
+    - auth_enabled=True ：AUTH_SECRET 必须非空、非弱值且长度 >= MIN_AUTH_SECRET_LEN，
+      否则 raise RuntimeError（拒绝启动）——空/弱密钥意味着 token 可被离线伪造，
+      等同于没有鉴权，绝不能带病上线。
+    - auth_enabled=False：调试模式，返回告警文案由调用方记录（不抛异常）。
+
+    返回：需要告警时返回告警文案，否则返回 None。
+    """
+    if not auth_enabled:
+        return (
+            "鉴权功能已关闭（AUTH_ENABLED=false）：当前为调试模式，任何 user_id 均可被指定/"
+            "冒充，仅供本地联调，严禁用于共享或生产环境；上线前设 AUTH_ENABLED=true 并配置"
+            "强随机 AUTH_SECRET（>=16 字符）。"
+        )
+    s = (auth_secret or "").strip()
+    if s in _WEAK_AUTH_SECRETS or len(s) < MIN_AUTH_SECRET_LEN:
+        raise RuntimeError(
+            "安全校验失败：AUTH_ENABLED=true 但 AUTH_SECRET 为空、弱值或过短"
+            f"（<{MIN_AUTH_SECRET_LEN} 字符）。空/弱签名密钥意味着 token 可被离线伪造，"
+            "等同于没有鉴权。请在 .env 配置强随机 AUTH_SECRET（建议 >=32 字节）后再启用鉴权。"
+        )
+    return None

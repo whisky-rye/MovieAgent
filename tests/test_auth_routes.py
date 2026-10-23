@@ -29,6 +29,17 @@ def require_mysql():
         pytest.skip(f"MySQL 不可用，跳过鉴权路由测试：{exc}")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def auth_test_secret():
+    """P0-1：AUTH_SECRET 未配置时 verify_token 不采信任何 token（空密钥签名可伪造）。
+    本文件验证注册/登录/me/登出全链路，需注入强测试密钥（相当于"调试态但配置了密钥"
+    的开发流）；不影响生产 .env，用完还原。"""
+    old = cs.settings.AUTH_SECRET
+    cs.settings.AUTH_SECRET = "test-secret-0123456789abcdef"
+    yield
+    cs.settings.AUTH_SECRET = old
+
+
 def _cleanup(uname):
     try:
         e = create_engine(cs.settings.MOVIE_AGENT_MYSQL_DSN)

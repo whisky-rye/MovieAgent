@@ -25,6 +25,31 @@ def test_plan_by_person():
     assert out["slots"].get("name") == "诺兰"
 
 
+def test_plan_by_person_empty_slots_no_crash():
+    """P0-2 回归：LLM 直返 by_person 且 name/query 均为空时不得崩溃（曾因引用
+    未定义变量 query 抛 NameError → 500），人名兜底应取原始输入。"""
+    state = {"intent": "by_person", "query": "诺兰的电影", "slots": {}}
+    out = graph_mod._plan(state)
+    assert out["plan"] == ["search_by_person"]
+    assert out["slots"].get("name") == "诺兰的电影"
+
+
+def test_parse_intent_by_person_backfills_query(monkeypatch):
+    """P0-2 回归：by_person 意图下 slots.query 为空时应回填原始输入（_plan 人名兜底来源）。"""
+    class _FakeResp:
+        content = ('{"intent":"by_person","query":"","name":"",'
+                   '"genres":[],"country":"","min_year":0,"item_hint":""}')
+
+    class _FakeLLM:
+        def invoke(self, *a, **k):
+            return _FakeResp()
+
+    monkeypatch.setattr(graph_mod, "chat_light", lambda *a, **k: _FakeLLM())
+    out = graph_mod._parse_intent({"user_id": "u", "query": "诺兰的电影", "request_id": ""})
+    assert out["intent"] == "by_person"
+    assert out["slots"]["query"] == "诺兰的电影"
+
+
 def test_parse_intent_corrects_person_query(monkeypatch):
     # LLM 误判为 recommend 时，关键词矫正应把它纠正为 by_person（验证白名单+矫正）
     class _FakeResp:

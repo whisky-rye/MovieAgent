@@ -50,7 +50,7 @@ from api.ratelimit import get_limiter, RateLimited
 from agent.memory import get_memory_store
 from agent.guardrail import check_guardrail
 from agent.poster import schedule_poster  # G-Poster：对话完成后异步生成 Top3 宣传海报
-from config.settings import settings
+from config.settings import settings, validate_auth_config
 from observability.metrics import metrics
 from observability.alerting import run_alert_loop
 
@@ -61,32 +61,21 @@ metrics.set_enabled(settings.METRICS_ENABLED)  # E4/O18：指标埋点总开关
 
 
 def validate_security_config() -> None:
-    """生产环境安全红线校验（启动即 fail-fast，避免带病上线）。
+    """鉴权总开关校验（启动即 fail-fast，避免带病上线）。
 
-    - APP_ENV=production 必须 AUTH_ENABLED=true（否则任何人可越权读取他人记忆）；
-    - APP_ENV=production 必须配置 AUTH_SECRET 且非默认值（否则 token 签名可伪造）；
-    - 非生产：AUTH_ENABLED=true 但缺 Secret 仅告警（便于本地调试）。
+    整个鉴权功能由单一 env 变量 `AUTH_ENABLED` 控制（语义见 config/settings.validate_auth_config）：
+    - AUTH_ENABLED=true：AUTH_SECRET 必须为强密钥（>=16 字符、非弱值），否则拒绝启动
+      （空/弱密钥 ⇒ token 可离线伪造）；同时启用强制 token 鉴权 + CSRF + Secure Cookie。
+    - AUTH_ENABLED=false：调试模式（body/query 指定 user_id），启动打显著告警。
     """
-    if settings.APP_ENV != "production":
-        if settings.AUTH_ENABLED and not settings.AUTH_SECRET:
-            logger_api.warning(
-                "鉴权已启用（AUTH_ENABLED=true）但 AUTH_SECRET 为空，token 签名不安全！"
-                "请在 .env 配置 AUTH_SECRET 后再启用鉴权。"
-            )
-        return
-    # 生产环境：强制红线
-    if not settings.AUTH_ENABLED:
-        raise RuntimeError(
-            "安全校验失败：APP_ENV=production 但 AUTH_ENABLED=false。"
-            "生产环境必须开启鉴权（AUTH_ENABLED=true），否则存在越权风险。"
+    warn = validate_auth_config(settings.AUTH_ENABLED, settings.AUTH_SECRET)
+    if warn:
+        logger_api.warning("[安全] %s", warn)
+    else:
+        logger_api.info(
+            "鉴权安全校验通过：AUTH_ENABLED=true，token 强制鉴权 + CSRF 双提交 + "
+            "Secure Cookie 均已生效。"
         )
-    _weak = {"", "changeme", "change_me", "secret", "default", "your-secret-here"}
-    if not settings.AUTH_SECRET or settings.AUTH_SECRET.strip() in _weak:
-        raise RuntimeError(
-            "安全校验失败：APP_ENV=production 但 AUTH_SECRET 未设置或仍为默认值。"
-            "生产环境必须配置强随机密钥（建议 >=32 字节），否则 token 可被伪造。"
-        )
-    logger_api.info("生产安全校验通过：鉴权已强制、AUTH_SECRET 已配置。")
 
 
 @asynccontextmanager
@@ -128,11 +117,13 @@ async def csrf_protect(request: Request, call_next):
     - 带 `Authorization: Bearer` 的请求视为 API 客户端，跳过（不依赖 Cookie，无 CSRF 风险）；
     - 非安全方法（POST/PUT/DELETE/PATCH）且非 Bearer 会话：必须携带与 ma_csrf Cookie
       一致的 X-CSRF-Token 头，否则 403；
-    - 豁免 /auth/*（登录/注册/登出是建立会话的入口，且非破坏性）；OPTIONS 预检直接放行。
+    - 豁免 /auth/login 与 /auth/register 精确路径（建立会话的入口，尚无会话、非破坏性）；
+      OPTIONS 预检直接放行。
+    注意：/auth/logout 会销毁会话，属破坏性操作，**不豁免**，必须过 CSRF 双提交校验。
     """
     if request.method in ("GET", "HEAD", "OPTIONS", "TRACE"):
         return await call_next(request)
-    if request.url.path.startswith("/auth/"):
+    if request.url.path in ("/auth/login", "/auth/register"):
         return await call_next(request)
     # 调试兼容模式（AUTH_ENABLED=false）：无真实 Cookie 鉴权会话，CSRF 无意义且会阻断
     # 「免登录」Demo 流程，故跳过校验；生产环境（AUTH_ENABLED=true，由启动校验强制）才启用。
@@ -214,6 +205,7 @@ async def log_http_requests(request: Request, call_next):
 
 logger_api.info(
     "服务启动", extra={"event": "startup", "env": settings.APP_ENV,
+    "auth_enabled": settings.AUTH_ENABLED,
     "llm_provider": settings.LLM_PROVIDER, "memory_backend": get_memory_store().backend(),
     "session_backend": get_session_store().backend(),
     "cache_backend": get_cache().backend(), "guardrail": settings.GUARDRAIL_ENABLED,
@@ -221,12 +213,6 @@ logger_api.info(
     "langsmith_tracing": _LS_ENABLED,
     "langsmith_project": settings.LANGSMITH_PROJECT or "-"},
 )
-
-if settings.AUTH_ENABLED and not settings.AUTH_SECRET:
-    logger_api.warning(
-        "鉴权已启用（AUTH_ENABLED=true）但 AUTH_SECRET 为空，token 签名不安全！"
-        "请在 .env 配置 AUTH_SECRET 后再启用鉴权。"
-    )
 
 # 模块级编译一次：LangGraph 编译后的图对象是不可变的，对并发 `.invoke()` 安全
 # （每次调用传入/返回独立 state，不在图对象上保留可变状态），故可跨请求复用，避免重复编译开销。

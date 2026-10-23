@@ -137,8 +137,9 @@ def _parse_intent(state: AgentState) -> AgentState:
                                     or ("我" in query and "喜欢" in query)
                                     or "我的偏好" in query or "偏好" in query):
         intent = "preference"
-    # query 兜底：内容类意图若解析出 query 为空，用原始输入
-    if not slots.get("query") and intent in ("recommend", "similar", "board", "explain"):
+    # query 兜底：内容类/by_person 意图若解析出 query 为空，用原始输入
+    # （by_person 的 query 同时作为人名兜底来源，见 _plan）
+    if not slots.get("query") and intent in ("recommend", "similar", "board", "explain", "by_person"):
         slots["query"] = query
     elapsed = int((time.time() - t0) * 1000)
     step = _new_step(state, "parse_intent", "llm",
@@ -272,8 +273,9 @@ def _plan(state: AgentState) -> AgentState:
     elif intent == "preference":
         plan = []
     elif intent == "by_person":
-        # 人名兜底：确保 runner 能拿到人名（LLM 可能填在 query 或 name）
-        slots["name"] = slots.get("name") or slots.get("query") or query
+        # 人名兜底：确保 runner 能拿到人名（LLM 可能填在 query 或 name；
+        # 均空时用原始输入兜底，注意必须取 state 内的 query——本作用域无局部 query 变量）
+        slots["name"] = slots.get("name") or slots.get("query") or state.get("query", "")
         plan = ["search_by_person"]
     else:  # recommend / explain -> 内容召回为主
         plan = ["search_by_text"]

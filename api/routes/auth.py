@@ -34,14 +34,26 @@ class LoginReq(BaseModel):
     password: str = Field(..., min_length=1, description="登录密码")
 
 
+def _cookie_secure() -> bool:
+    """Cookie Secure 标志：跟随鉴权总开关 AUTH_ENABLED（true → 仅 HTTPS 传输）。
+
+    - COOKIE_SECURE 显式配置（true/false）优先，可覆盖（如内网 HTTP 联调需显式 false）；
+    - 未配置（None）时 = AUTH_ENABLED：鉴权开启即强制 Secure，杜绝 token 明文传输。
+    """
+    if settings.COOKIE_SECURE is not None:
+        return settings.COOKIE_SECURE
+    return settings.AUTH_ENABLED
+
+
 def _set_auth_cookies(resp: Response, token: str) -> None:
     """下发 ma_token（HttpOnly）+ ma_csrf（可读）双 Cookie。
 
-    - Secure 仅在非本地（生产/HTTPS）开启，本地 HTTP 下若设 Secure 会导致 Cookie 不被发送。
+    - Secure 跟随鉴权总开关（见 _cookie_secure）：AUTH_ENABLED=true 时默认仅 HTTPS，
+      杜绝 token 明文传输；本地 HTTP 联调可显式 COOKIE_SECURE=false 覆盖。
     - SameSite=Lax：允许前端(5173) ↔ 后端(8000) 同站跨端口携带，同时挡住跨站 CSRF 顶层的 POST。
     - 仍返回 JSON 中的 token，便于非浏览器 API 客户端（Bearer）使用；浏览器前端只依赖 Cookie。
     """
-    secure = settings.COOKIE_SECURE or (settings.APP_ENV == "production")
+    secure = _cookie_secure()
     max_age = settings.AUTH_TOKEN_TTL
     resp.set_cookie(
         key=settings.AUTH_COOKIE_NAME,

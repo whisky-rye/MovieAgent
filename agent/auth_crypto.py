@@ -56,14 +56,24 @@ def issue_token(user_id: str, username: str, ttl: Optional[int] = None) -> str:
 
 
 def verify_token(token: str) -> Optional[dict]:
-    """验签 + 验期；任何失败返回 None（由依赖层转 401）。"""
+    """验签 + 验期；任何失败返回 None（由依赖层转 401）。
+
+    安全红线（P0-1）：AUTH_SECRET 未配置（空/空白）时**不采信任何 token**——
+    空密钥下 HMAC 签名可被任意离线伪造，此时若仍接受 token 等同于允许冒充任意用户。
+    （合法部署由启动校验保证：AUTH_ENABLED=true 时 AUTH_SECRET 必为强密钥。）
+    """
+    if not token:
+        return None
+    secret = settings.AUTH_SECRET
+    if not secret or not secret.strip():
+        return None
     try:
         header, payload, sig = token.split(".")
     except Exception:
         return None
     signing_input = f"{header}.{payload}".encode("utf-8")
     expected = hmac.new(
-        settings.AUTH_SECRET.encode("utf-8"), signing_input, hashlib.sha256
+        secret.encode("utf-8"), signing_input, hashlib.sha256
     ).hexdigest()
     if not hmac.compare_digest(expected, sig):
         return None

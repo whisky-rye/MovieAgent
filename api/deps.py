@@ -1,10 +1,12 @@
 """G1 鉴权依赖：get_current_user 注入当前登录用户（user_id / username）。
 
-设计要点：
-- AUTH_ENABLED=false（调试兼容）：优先取 query 参数 user_id，其次请求体 user_id，
-  再退 request.state.user_id；不要求 token，现有 curl/前端联调不中断。
-- AUTH_ENABLED=true（生产鉴权）：必须 `Authorization: Bearer <token>`，验签/验期失败 → 401；
+设计要点（P0-1 起，整个鉴权功能由单一 env 变量 AUTH_ENABLED 总控）：
+- AUTH_ENABLED=true（鉴权态）：必须携带合法 Bearer/Cookie token，验签/验期失败 → 401；
   成功则把 token 内的 user_id 注入，忽略请求体里的 user_id（防越权读取他人记忆）。
+  该模式下启动校验强制 AUTH_SECRET 为强密钥（否则拒绝启动）。
+- AUTH_ENABLED=false（调试兼容）：无有效 token 时按 query > body > state > default 取 user_id。
+  注意：AUTH_SECRET 未配置时 verify_token 不采信任何 token（空密钥签名可离线伪造），
+  故此模式下 body/query 传的 user_id 就是身份来源，仅限本地联调。
 - 无论哪种模式，都把权威 user_id 写回 request.state.user_id，供日志/下游使用。
 """
 from __future__ import annotations
