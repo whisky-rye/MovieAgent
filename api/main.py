@@ -462,8 +462,10 @@ def recommend(
     auth: CurrentUser = Depends(get_current_user),
 ):
     # P4.2 + O8：缓存优先（精确 / 语义近义），命中直接返回
+    # P0-7：缓存键必须带 session_id——answer 在会话历史上下文下生成，
+    # 跨会话复用会把「看过别的会话历史」的答案串到当前会话。
     cache = get_cache()
-    ck = cache_key(req.query, auth.user_id, str(req.top_k))
+    ck = cache_key(req.query, auth.user_id, str(req.top_k), req.session_id or "")
     hit = cache.get(ck)
     if hit is not None:
         out = dict(hit)
@@ -480,7 +482,7 @@ def recommend(
         return out
 
     # O8：语义近义命中——复用候选列表，按新 query 重生成解说（用户确认「仅复用候选 items」）
-    sem = get_sem_cache().match(req.query, auth.user_id, req.top_k)
+    sem = get_sem_cache().match(req.query, auth.user_id, req.top_k, req.session_id or "")
     if sem is not None:
         cached_items = (sem["value"].get("items") or [])[: req.top_k]
         if sem["exact"]:
@@ -515,13 +517,13 @@ def recommend(
             return out
         resp = _build_recommend_resp(
             req, cached_items, answer, sem["value"].get("intent", ""),
-            sem["value"].get("sources", {}), sem["value"].get("steps", []),
-            sem["value"].get("thinking", {}), True, True,
+            sem["value"].get("sources", {}), [], {}, True, True,
             request.state.request_id, 0,
         )
         # 把本次 (query, 重生成结果) 落精确缓存 + 索引，后续同 query 直接精确命中
+        # （P0-7：steps/thinking 是旧 query 的链路诊断，近义命中不复用，传空）
         cache.set(ck, resp)
-        get_sem_cache().index_query(req.query, auth.user_id, req.top_k, resp)
+        get_sem_cache().index_query(req.query, auth.user_id, req.top_k, resp, req.session_id or "")
         metrics.incr("recommend_cache_hit_total", 1, {"type": "semantic_near"})
         logger_api.info(
             "recommend 语义命中(近义复用候选)", extra={"event": "recommend", "user_id": auth.user_id,
@@ -567,7 +569,7 @@ def recommend(
         "guardrail_action": resp["guardrail"]["action"]},
     )
     cache.set(ck, resp)
-    get_sem_cache().index_query(req.query, auth.user_id, req.top_k, resp)
+    get_sem_cache().index_query(req.query, auth.user_id, req.top_k, resp, req.session_id or "")
     return resp
 
 

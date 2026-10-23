@@ -18,7 +18,7 @@ def _cosine(a, b) -> float:
 
 
 class FakeIndex:
-    """内存向量索引：按 user_id 过滤，返回最近邻 (id,doc,meta,distance)。"""
+    """内存向量索引：按 where 全量条件过滤（user_id / session_id），返回最近邻。"""
 
     def __init__(self):
         self.rows = []
@@ -30,7 +30,7 @@ class FakeIndex:
     def query(self, vector, top_k=1, where=None, genres=None):
         best = None
         for (i, d, m, v) in self.rows:
-            if where and m.get("user_id") != where.get("user_id"):
+            if where and any(m.get(k) != val for k, val in where.items()):
                 continue
             sim = _cosine(v, vector)
             dist = 1.0 - sim
@@ -132,3 +132,39 @@ def test_disabled_returns_none():
     val = _sample_value([{"id": "imdb:1"}])
     cache.index_query("科幻片", "u1", 10, val)
     assert cache.match("科幻片", "u1", 10) is None
+
+
+# ---------------------------------------------------------------------------
+# P0-7：会话维度隔离（缓存键/语义索引带 session_id，防跨会话串答案）
+# ---------------------------------------------------------------------------
+
+def test_session_isolation_semantic_index(sem):
+    """同一用户不同会话：语义索引不得互相命中（answer 含会话历史上下文）。"""
+    cache, _idx = sem
+    val = _sample_value([{"id": "imdb:1", "title": "X"}])
+    cache.index_query("科幻片", "u1", 10, val, session_id="s1")
+    # 同会话命中
+    assert cache.match("科幻片", "u1", 10, session_id="s1") is not None
+    # 跨会话不命中
+    assert cache.match("科幻片", "u1", 10, session_id="s2") is None
+    # 临时对话（空 session）也不命中会话内缓存
+    assert cache.match("科幻片", "u1", 10) is None
+
+
+def test_session_scoped_cache_keys_differ():
+    """精确缓存 key 必须随 session_id 变化（同 query 不同会话 → 不同 key）。"""
+    from api.cache import cache_key
+
+    k1 = cache_key("q", "u1", "10", "s1")
+    k2 = cache_key("q", "u1", "10", "s2")
+    k3 = cache_key("q", "u1", "10", "")
+    assert k1 != k2 and k1 != k3 and k2 != k3
+
+
+def test_temp_session_shares_namespace(sem):
+    """临时对话（无 session_id）之间共享同一 key 空间（无历史上下文，可安全复用）。"""
+    cache, _ = sem
+    val = _sample_value([{"id": "imdb:2", "title": "Y"}])
+    cache.index_query("科幻片", "u9", 10, val)  # 默认空 session
+    assert cache.match("科幻片", "u9", 10) is not None
+    assert cache.match("科幻片", "u9", 10, session_id="") is not None

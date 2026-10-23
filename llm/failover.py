@@ -221,18 +221,19 @@ def reset_exhausted() -> None:
 
 
 def _is_quota_exhausted(err: Exception) -> bool:
-    """识别阿里云「免费额度用完即停」：403 + AllocationQuota.FreeTierOnly.
+    """识别阿里云「免费额度用完即停」：仅当错误体含额度语义 marker 才判熔断。
 
     官方说明：免费额度用尽后平台自动停止服务，返回 403 错误
     AllocationQuota.FreeTierOnly.。此类错误不可逆（额度已尽），应永久熔断。
+
+    教训（P0-5）：曾按「异常对象带 status_code/code == 403」一律熔断，导致
+    API Key 失效、区域不支持、内容审核 403、网关 403 等**可恢复故障**被当成
+    不可逆计费故障永久熔断并持久化，只能手动 CLOUD_LLM_RESET_QUOTA 恢复。
+    403 本身不是额度信号，必须与额度语义（marker / quota·freetier 文本）同时出现。
     """
     msg = _safe(err)
     for marker in ("AllocationQuota.FreeTierOnly", "FreeTierOnly"):
         if marker in msg:
-            return True
-    for attr in ("status_code", "http_status", "code"):
-        v = getattr(err, attr, None)
-        if v in (403, "403"):
             return True
     low = msg.lower()
     if "403" in msg and ("quota" in low or "freetier" in low):
@@ -445,11 +446,17 @@ class FailoverChatModel(BaseChatModel):
         return await self._run_failover(messages, stop, run_manager, kwargs, async_mode=True)
 
     def _stream(self, messages, stop=None, run_manager=None, **kwargs):
-        """同步流式降级：逐 chunk 透传首个可用模型；中途异常切下一模型，
-        末次仍失败则回退非流式产出单个 chunk，保证「至少有一段回复」。"""
+        """同步流式降级：逐 chunk 透传首个可用模型。
+
+        防「半截拼接」（P0-6）：一旦已向调用方产出 chunk，中途失败时**不再切换
+        模型、不再追加非流式兜底全文**——那会生成「模型A残句 + 模型B全文」的
+        重复/自相矛盾回答；改为发一条中断提示后结束流。未产出任何 chunk 时
+        （连接即失败）才正常降级到下一模型 / 走非流式兜底。
+        """
         candidates = [m for m in self.models if m not in _EXHAUSTED] or list(self.models)
         cap = self.max_fallbacks + 1          # primary + N 次降级
         tried = 0
+        produced = False                      # 是否已向调用方产出过 chunk
         for model in candidates:
             tried += 1
             try:
@@ -457,6 +464,7 @@ class FailoverChatModel(BaseChatModel):
                 t0 = time.time()
                 llm = self._build(model)
                 for chunk in llm.stream(messages):
+                    produced = True
                     yield ChatGenerationChunk(message=chunk)
                 _log(f"OK_STREAM model={model} lat={int((time.time() - t0) * 1000)}ms")
                 return
@@ -475,6 +483,17 @@ class FailoverChatModel(BaseChatModel):
                                    extra={"event": "model_fail", "model": model,
                                           "tier": self.tier, "err": _safe(e)})
                     _record_failover(self.tier, "transient")
+                if produced:
+                    # 已产出部分内容：切换模型/追加全文会造成「残句+全文」拼接，
+                    # 仅提示中断后结束（P0-6）
+                    logger.warning(
+                        "STREAM_PARTIAL_BREAK 流式中途失败且已产出部分内容，停止切换模型",
+                        extra={"event": "stream_partial_break", "model": model,
+                               "tier": self.tier, "err": _safe(e)},
+                    )
+                    yield ChatGenerationChunk(message=AIMessageChunk(
+                        content="\n\n（模型响应中途中断，以上为部分内容）"))
+                    return
                 if tried >= cap:
                     try:
                         res = self._run_failover(messages, stop, run_manager, kwargs, async_mode=False)
@@ -487,10 +506,11 @@ class FailoverChatModel(BaseChatModel):
                     return
 
     async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
-        """异步流式降级：同 _stream，但使用 astream。"""
+        """异步流式降级：同 _stream（含 P0-6 防半截拼接），但使用 astream。"""
         candidates = [m for m in self.models if m not in _EXHAUSTED] or list(self.models)
         cap = self.max_fallbacks + 1
         tried = 0
+        produced = False
         for model in candidates:
             tried += 1
             try:
@@ -498,6 +518,7 @@ class FailoverChatModel(BaseChatModel):
                 t0 = time.time()
                 llm = self._build(model)
                 async for chunk in llm.astream(messages):
+                    produced = True
                     yield ChatGenerationChunk(message=chunk)
                 _log(f"OK_ASTREAM model={model} lat={int((time.time() - t0) * 1000)}ms")
                 return
@@ -514,6 +535,17 @@ class FailoverChatModel(BaseChatModel):
                     logger.warning("TRANSIENT_FAIL_ASTREAM 流式模型瞬时失败触发降级",
                                    extra={"event": "model_fail", "model": model,
                                           "tier": self.tier, "err": _safe(e)})
+                    _record_failover(self.tier, "transient")
+                if produced:
+                    # 已产出部分内容：不切换模型、不追加全文，仅提示中断（P0-6）
+                    logger.warning(
+                        "STREAM_PARTIAL_BREAK 流式中途失败且已产出部分内容，停止切换模型",
+                        extra={"event": "stream_partial_break", "model": model,
+                               "tier": self.tier, "err": _safe(e)},
+                    )
+                    yield ChatGenerationChunk(message=AIMessageChunk(
+                        content="\n\n（模型响应中途中断，以上为部分内容）"))
+                    return
                 if tried >= cap:
                     try:
                         res = await self._run_failover(messages, stop, run_manager, kwargs, async_mode=True)

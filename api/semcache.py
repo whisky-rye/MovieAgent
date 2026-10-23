@@ -82,13 +82,18 @@ class SemanticCache:
             logger.warning("语义缓存：嵌入失败，退回精确缓存（不命中语义）: %s", e)
             return None
 
-    def match(self, query: str, user_id: str, top_k: int) -> Optional[dict]:
+    def match(self, query: str, user_id: str, top_k: int,
+              session_id: str = "") -> Optional[dict]:
         """语义命中查询。返回命中结构或 None。
 
         返回 dict：
           {"value": <缓存整包>, "exact": bool}
           exact=True 表示命中的是「完全相同」的 query（直接复用整包）；
           exact=False 表示「近义」命中（调用方应仅复用 items 并重生成 answer）。
+
+        session_id：会话维度隔离（P0-7）。推荐 answer 在会话历史上下文下生成，
+        跨会话复用会把「看过别的会话历史」的答案串到当前会话；语义索引与回源
+        key 均按 (user_id, session_id) 过滤/派生，临时对话（空 session）各自共享。
         """
         if not self.enabled:
             return None
@@ -96,7 +101,10 @@ class SemanticCache:
         if emb is None:
             return None
         try:
-            rows = self.index.query(emb, top_k=1, where={"user_id": user_id})
+            rows = self.index.query(
+                emb, top_k=1,
+                where={"user_id": user_id, "session_id": session_id or ""},
+            )
         except Exception as e:  # noqa: BLE001 - 索引不可用 → 降级
             logger.warning("语义缓存：索引检索失败，退回精确缓存: %s", e)
             return None
@@ -115,11 +123,16 @@ class SemanticCache:
         exact = (meta.get("query", "") == _norm(query))
         return {"value": val, "exact": exact}
 
-    def index_query(self, query: str, user_id: str, top_k: int, value: Any) -> None:
-        """写入一条 query→cache_key 的语义索引（连同主缓存精确写入）。"""
+    def index_query(self, query: str, user_id: str, top_k: int, value: Any,
+                    session_id: str = "") -> None:
+        """写入一条 query→cache_key 的语义索引（连同主缓存精确写入）。
+
+        key 派生与索引过滤均带 session_id（P0-7），与 api/main.py 的精确缓存键
+        保持一致；旧索引（无 session_id 维度）自然失配，等同一次缓存预热。
+        """
         if not self.enabled:
             return
-        key = cache_key(query, user_id, str(top_k))
+        key = cache_key(query, user_id, str(top_k), session_id or "")
         self.cache.set(key, value)  # 保证精确 key 一定存在（语义命中回源用）
         emb = self._embed_one(query)
         if emb is None:
@@ -129,7 +142,8 @@ class SemanticCache:
             self.index.upsert(
                 ids=[cid],
                 docs=[_norm(query)],
-                metas=[{"cache_key": key, "query": _norm(query), "user_id": user_id}],
+                metas=[{"cache_key": key, "query": _norm(query),
+                        "user_id": user_id, "session_id": session_id or ""}],
                 vectors=[emb],
             )
         except Exception as e:  # noqa: BLE001 - 索引写入失败不影响主缓存
