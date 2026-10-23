@@ -130,8 +130,10 @@ class MySQLSessionStore:
 
     def append_message(self, sid: str, msg: dict) -> None:
         with self._engine.begin() as c:
+            # P1-2：FOR UPDATE 锁行直到事务提交——否则「读 messages → 改 → 写回」
+            # 在并发下互相覆盖（流式推荐落库与前端 pushMessage 同时打会丢消息）。
             r = c.execute(
-                text("SELECT messages, title FROM sessions WHERE session_id=:sid"),
+                text("SELECT messages, title FROM sessions WHERE session_id=:sid FOR UPDATE"),
                 {"sid": sid},
             ).mappings().first()
             if r is None:

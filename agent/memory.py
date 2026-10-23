@@ -18,6 +18,7 @@ from typing import Optional
 from sqlalchemy import create_engine, text
 
 from config.settings import settings
+from retrieval.candidates import normalize_genres
 
 logger = logging.getLogger("movie_agent.memory")
 
@@ -35,6 +36,20 @@ class MemoryStore(ABC):
     @abstractmethod
     def save(self, user_id: str, data: dict) -> None: ...
 
+    def update(self, user_id: str, mutator):
+        """原子读-改-写（P1-2）：单事务内 加锁读 → mutator 改 → 写回。
+
+        背景：add_pref / sediment_preferences / push_history 早期都是
+        load→改→save 三次独立连接操作；同一用户并发请求（多标签页、流式推荐与
+        偏好沉淀同时打）会互相覆盖丢更新。默认实现退化为 load/mutator/save
+        （无锁，供非 MySQL 后端）；MySQL 子类以 `SELECT ... FOR UPDATE` 覆盖
+        为真原子。mutator 原地修改 data，返回值原样透传。
+        """
+        d = self.load(user_id)
+        out = mutator(d)
+        self.save(user_id, d)
+        return out
+
     # 后端标识 / 健康探测（便于 /health 观测；子类可覆盖）
     def backend(self) -> str:
         return "abstract"
@@ -51,22 +66,28 @@ class MemoryStore(ABC):
         genres: list[str] | None = None,
         note: str | None = None,
     ) -> dict:
-        d = self.load(user_id)
-        prefs = d.setdefault("preferences", {})
-        if genres:
-            cur = prefs.setdefault("genres", [])
-            for g in genres:
-                if g and g not in cur:
-                    cur.append(g)
-        if note:
-            prefs["note"] = note
-        self.save(user_id, d)
-        return prefs
+        # P1-1：类型必须过词表闸门——非标准类型（正则切出的汉语片段 / LLM 幻觉）
+        # 一旦入库就会作为内容召回过滤条件下推，把召回结果打空。
+        clean = normalize_genres(genres)
+
+        def _mut(d: dict) -> dict:
+            prefs = d.setdefault("preferences", {})
+            if clean:
+                cur = prefs.setdefault("genres", [])
+                for g in clean:
+                    if g not in cur:
+                        cur.append(g)
+            if note:
+                prefs["note"] = note
+            return prefs
+
+        return self.update(user_id, _mut)
 
     def push_history(self, user_id: str, item: dict) -> None:
-        d = self.load(user_id)
-        d.setdefault("history", []).append(item)
-        self.save(user_id, d)
+        def _mut(d: dict) -> None:
+            d.setdefault("history", []).append(item)
+
+        self.update(user_id, _mut)
 
     def sediment_preferences(
         self, user_id: str, *,
@@ -79,32 +100,36 @@ class MemoryStore(ABC):
     ) -> dict:
         """G4 自动沉淀：把本轮抽取到的结构化偏好合并进画像（去重），并可选追加一条历史。
 
-        - genres/directors/actors/people 各自去重合并进 preferences 对应列表；
+        - genres 过词表闸门（P1-1）后去重合并；directors/actors/people 为人名/片名，
+          自由文本不做词表校验；
         - note 覆盖写（latest wins）；
         - history_item 非 None 时追加到 history（避免无限膨胀由调用方控制频率）；
-        - 复用 load/save，子类（MySQL/内存）无需各自实现。
+        - 经 self.update 单事务原子完成（P1-2），子类无需各自实现。
         """
-        d = self.load(user_id)
-        prefs = d.setdefault("preferences", {})
+        clean_genres = normalize_genres(genres)
 
-        def _merge(key: str, vals) -> None:
-            if not vals:
-                return
-            cur = prefs.setdefault(key, [])
-            for v in vals:
-                if v and v not in cur:
-                    cur.append(v)
+        def _mut(d: dict) -> dict:
+            prefs = d.setdefault("preferences", {})
 
-        _merge("genres", genres)
-        _merge("directors", directors)
-        _merge("actors", actors)
-        _merge("people", people)
-        if note:
-            prefs["note"] = note
-        if history_item:
-            d.setdefault("history", []).append(history_item)
-        self.save(user_id, d)
-        return prefs
+            def _merge(key: str, vals) -> None:
+                if not vals:
+                    return
+                cur = prefs.setdefault(key, [])
+                for v in vals:
+                    if v and v not in cur:
+                        cur.append(v)
+
+            _merge("genres", clean_genres)
+            _merge("directors", directors)
+            _merge("actors", actors)
+            _merge("people", people)
+            if note:
+                prefs["note"] = note
+            if history_item:
+                d.setdefault("history", []).append(history_item)
+            return prefs
+
+        return self.update(user_id, _mut)
 
 
 class MySQLMemoryStore(MemoryStore):
@@ -160,6 +185,34 @@ class MySQLMemoryStore(MemoryStore):
 
     def backend(self) -> str:
         return "mysql"
+
+    def update(self, user_id: str, mutator):
+        """原子读-改-写（P1-2）：单事务 `SELECT ... FOR UPDATE` → mutator → upsert。
+
+        user_id 是主键：行存在则锁该行直到事务提交；行不存在时 InnoDB 在 RR
+        隔离下对主键空隙加 gap lock，两个并发「新用户首次写入」同样被串行化，
+        不会各持一份旧数据互相覆盖。
+        """
+        with self._engine.begin() as c:
+            row = c.execute(
+                text("SELECT data FROM user_preferences WHERE user_id=:uid FOR UPDATE"),
+                {"uid": user_id},
+            ).fetchone()
+            if row is None:
+                d = {"user_id": user_id, "preferences": {}, "history": []}
+            else:
+                raw = row[0]
+                d = raw if isinstance(raw, dict) else json.loads(raw)
+            out = mutator(d)
+            c.execute(
+                text(
+                    "INSERT INTO user_preferences (user_id, data, updated_at) "
+                    "VALUES (:uid, :data, NOW()) "
+                    "ON DUPLICATE KEY UPDATE data=:data, updated_at=NOW()"
+                ),
+                {"uid": user_id, "data": json.dumps(d, ensure_ascii=False)},
+            )
+        return out
 
     def health(self) -> bool:
         try:

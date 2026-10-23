@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -109,28 +110,54 @@ class MySQLFeedbackStore(FeedbackStore):
             # 若两条并存（先踩后赞），_feedback_term 的黑名单分支优先命中，会导致
             # 界面已切成「喜欢」而排序仍按「踩」处理 —— 故写入前先清掉旧显式记录。
             # 隐式信号（click/impression）保持流水语义，不参与互斥。
-            if signal in _EXPLICIT_SIGNALS:
+            #
+            # P1-2：DELETE+INSERT 两步在并发下会双写（两个请求都看到"无旧记录"），
+            # 用 MySQL 命名锁把「删+插」串行化：跨连接/多 worker 生效，锁名取
+            # user+item 的 md5（定长无碰撞）；会话结束（提交/回滚/连接回收）自动
+            # 释放，无需改表结构。隐式信号高频流水，不加锁。
+            locked = signal in _EXPLICIT_SIGNALS
+            lock_name = ""
+            if locked:
+                lock_name = "fbx:" + hashlib.md5(
+                    f"{user_id}:{item_id}".encode("utf-8")
+                ).hexdigest()
+                got = c.execute(
+                    text("SELECT GET_LOCK(:k, 3)"), {"k": lock_name}
+                ).scalar()
+                if not got:
+                    # 拿锁超时：不阻断反馈链路（读取侧 _aggregate 仍有"最新显式
+                    # 信号优先"去重兜底），仅告警留痕
+                    logger.warning(
+                        "GET_LOCK 超时，反馈互斥降级为 best-effort",
+                        extra={"event": "feedback_lock_timeout",
+                               "user_id": user_id, "item_id": item_id},
+                    )
+            try:
+                if locked:
+                    c.execute(
+                        text(
+                            "DELETE FROM user_feedback WHERE `user_id`=:uid AND `item_id`=:iid "
+                            "AND `signal` IN (:s1,:s2)"
+                        ),
+                        {
+                            "uid": user_id, "iid": item_id,
+                            "s1": SIGNAL_EXPLICIT_LIKE, "s2": SIGNAL_EXPLICIT_DISLIKE,
+                        },
+                    )
                 c.execute(
                     text(
-                        "DELETE FROM user_feedback WHERE `user_id`=:uid AND `item_id`=:iid "
-                        "AND `signal` IN (:s1,:s2)"
+                        "INSERT INTO user_feedback "
+                        "(`user_id`,`item_id`,`item_kind`,`signal`,`rank`,`query`,`genres`,`weight`) "
+                        "VALUES (:uid,:iid,:kind,:sig,:rank,:q,:g,:w)"
                     ),
                     {
-                        "uid": user_id, "iid": item_id,
-                        "s1": SIGNAL_EXPLICIT_LIKE, "s2": SIGNAL_EXPLICIT_DISLIKE,
+                        "uid": user_id, "iid": item_id, "kind": item_kind, "sig": signal,
+                        "rank": rank, "q": query, "g": genres_str, "w": float(weight),
                     },
                 )
-            c.execute(
-                text(
-                    "INSERT INTO user_feedback "
-                    "(`user_id`,`item_id`,`item_kind`,`signal`,`rank`,`query`,`genres`,`weight`) "
-                    "VALUES (:uid,:iid,:kind,:sig,:rank,:q,:g,:w)"
-                ),
-                {
-                    "uid": user_id, "iid": item_id, "kind": item_kind, "sig": signal,
-                    "rank": rank, "q": query, "g": genres_str, "w": float(weight),
-                },
-            )
+            finally:
+                if locked and lock_name:
+                    c.execute(text("SELECT RELEASE_LOCK(:k)"), {"k": lock_name})
 
     def get_profile(self, user_id: str, half_life_days: int = 30) -> dict:
         """聚合反馈画像：类型亲和度 / item 黑名单 / item 加分（带时间衰减）。

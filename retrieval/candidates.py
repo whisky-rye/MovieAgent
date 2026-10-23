@@ -93,3 +93,33 @@ def merge_candidate(base: "Candidate", c: "Candidate") -> "Candidate":
 def split_genres(s) -> list[str]:
     """把 '剧情|科幻/喜剧' 这类串拆成列表（覆盖豆瓣/IMDb 的 | / , 分隔）。"""
     return [g for g in re.split(r"[\|/,、\s]+", (s or "").strip()) if g]
+
+
+#: 标准影片类型词表（中文，对齐豆瓣/IMDb 常见类型）。
+#: 只作「偏好写入校验闸门」用：偏好里的 genres 会作为内容召回过滤条件下推
+#: （vector backend 按类型集合求交），非标准类型串匹配不到任何影片。
+KNOWN_GENRES = frozenset({
+    "剧情", "喜剧", "动作", "爱情", "科幻", "悬疑", "惊悚", "恐怖", "战争",
+    "犯罪", "奇幻", "冒险", "动画", "动画电影", "纪录片", "短片", "传记",
+    "历史", "古装", "武侠", "家庭", "儿童", "音乐", "歌舞", "运动", "西部",
+    "黑色电影", "独立电影", "灾难", "情色", "同性", "脱口秀", "戏曲", "舞台艺术",
+})
+
+
+def normalize_genres(values) -> list[str]:
+    """偏好类型校验闸门（P1-1）：去空白/去重，仅保留 KNOWN_GENRES 内标准类型。
+
+    背景：曾用正则 `[\u4e00-\u9fa0]{2,3}` 从用户原话切"类型"，「我喜欢周星驰的电影」
+    会切出 ["我喜欢","周星驰","的电"] 落库，此后该用户每次内容召回都带这些垃圾
+    类型过滤 → 召回空结果、推荐质量静默劣化，且垃圾偏好永久留存。
+    现在任何写入路径（add_pref / sediment_preferences / 偏好意图）都必须过本闸门，
+    非词表条目（正则片段、LLM 幻觉、中英混合）一律丢弃。保序去重。
+    """
+    out: list[str] = []
+    for v in values or []:
+        if not v:
+            continue
+        g = str(v).strip()
+        if g in KNOWN_GENRES and g not in out:
+            out.append(g)
+    return out

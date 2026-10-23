@@ -26,6 +26,7 @@ from agent.tools import RUNNERS
 from agent.memory import get_memory_store
 from agent.feedback_store import get_feedback_store
 from retrieval import content_recall
+from retrieval.candidates import normalize_genres
 from ranker import rerank
 from config.settings import settings
 from llm.client import chat_light, strip_think
@@ -388,11 +389,11 @@ def _generate(state: AgentState) -> AgentState:
     uid = state.get("user_id", "default")
     intent = state["intent"]
     if intent == "preference":
-        # 把意图里的类型写进记忆
+        # 把意图里的类型写进记忆（P1-1：仅接受 LLM 给出的类型并过词表闸门；
+        # 曾用正则从原话切 2-3 字汉语片段当类型，「我喜欢周星驰的电影」会切出
+        # ["我喜欢","周星驰","的电"] 落库并打空后续召回，已删除该兜底）
         slots = state.get("slots", {})
-        genres = slots.get("genres") or []
-        if not genres:
-            genres = re.findall(r"[\u4e00-\u9fa5]{2,3}", slots.get("query", ""))
+        genres = normalize_genres(slots.get("genres") or [])
         get_memory_store().add_pref(uid, genres=genres or None)
         elapsed = int((time.time() - t0) * 1000)
         step = _new_step(state, "generate", "memory", "记录用户偏好",
