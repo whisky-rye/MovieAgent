@@ -283,6 +283,80 @@ def test_metadata_cannot_access_business_tables():
 
 
 # ---------------------------------------------------------------------------
+# 表引用提取盲区回归（P0-3）：逗号连接 / STRAIGHT_JOIN / 系统库限定引用 /
+# 元数据过滤值校验
+# ---------------------------------------------------------------------------
+
+def test_comma_join_forbidden_table_rejected():
+    """逗号隐式连接不得成为表白名单盲区（曾实测可被绕过）。"""
+    for sql in (
+        "SELECT id FROM imdb_main, mysql.user LIMIT 1",
+        "SELECT id FROM imdb_main, movie_agent.users LIMIT 1",
+        "SELECT id FROM imdb_main m, mysql.user u LIMIT 1",
+    ):
+        with pytest.raises(ReadOnlyViolation):
+            check_sql(sql)
+
+
+def test_straight_join_forbidden_table_rejected():
+    """STRAIGHT_JOIN 曾是 _TABLE_REF 盲区（\bjoin\b 不匹配 straight_join）。"""
+    with pytest.raises(ReadOnlyViolation):
+        check_sql("SELECT id FROM imdb_main STRAIGHT_JOIN mysql.user ON 1=1 LIMIT 1")
+
+
+def test_schema_qualified_system_reference_rejected_even_without_from():
+    """兜底扫描：任何位置的系统库限定引用都被拒（不依赖表提取路径）。"""
+    with pytest.raises(ReadOnlyViolation):
+        check_sql("SELECT id FROM imdb_main WHERE x = mysql.user LIMIT 1")
+
+
+def test_literal_containing_system_schema_not_false_positive():
+    """影片名等字面量内容不算表引用，不得误伤（兜底扫描走掩码视图）。"""
+    d = check_sql("SELECT title FROM imdb_main WHERE title = 'mysql.user' LIMIT 10")
+    assert d.allowed is True
+
+
+def test_legit_comma_join_allowed():
+    """合法逗号连接必须放行，且两张表都应被提取到。"""
+    d = check_sql("SELECT a.id, b.title FROM imdb_main a, douban_main b "
+                  "WHERE a.imdb_id = b.imdb_id LIMIT 10")
+    assert d.allowed is True
+    assert set(d.tables) == {"imdb_main", "douban_main"}
+
+
+def test_legit_group_by_columns_not_treated_as_tables():
+    """GROUP BY / ORDER BY 后的列名不得被逗号续扫误当成表（终止符守护）。"""
+    sql = ("SELECT title, year FROM imdb_main "
+           "GROUP BY title, year ORDER BY year, title LIMIT 10")
+    d = check_sql(sql)
+    assert d.allowed is True
+    assert d.tables == ["imdb_main"]
+
+
+def test_metadata_literal_schema_value_validated():
+    """元数据过滤字面量值必须是白名单库（曾实测 table_schema='mysql' 被放行）。"""
+    with pytest.raises(ReadOnlyViolation):
+        check_sql("SELECT table_name FROM information_schema.tables "
+                  "WHERE table_schema = 'mysql' LIMIT 1", allow_metadata=True)
+
+
+def test_metadata_literal_schema_value_allowed():
+    d = check_sql("SELECT table_name FROM information_schema.tables "
+                  "WHERE table_schema = 'imdb' LIMIT 1", allow_metadata=True)
+    assert d.allowed is True
+
+
+def test_metadata_in_list_values_validated():
+    ok = ("SELECT table_name FROM information_schema.tables "
+          "WHERE table_schema IN ('imdb','imdb2') LIMIT 1")
+    assert check_sql(ok, allow_metadata=True).allowed is True
+    bad = ("SELECT table_name FROM information_schema.tables "
+           "WHERE table_schema IN ('imdb','mysql') LIMIT 1")
+    with pytest.raises(ReadOnlyViolation):
+        check_sql(bad, allow_metadata=True)
+
+
+# ---------------------------------------------------------------------------
 # 辅助接口
 # ---------------------------------------------------------------------------
 

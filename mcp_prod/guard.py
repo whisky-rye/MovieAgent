@@ -7,8 +7,10 @@
 纵深防御（从外到内）：
 1. 语义校验：只读语句白名单 + 表前缀白名单 + 危险子句/函数黑名单。
 2. 语法加固：剥离注释后重新解析（防 `SE/**/LECT`、换行注入）；拒绝多语句（`;`）。
-3. 强制 LIMIT：自动追加并钳制上限，杜绝全表拉取打爆生产库。
-4. 参数化：外部输入一律走 `%s` 占位符绑定（由 queries 层保证），护栏拒绝字面量拼接
+3. 表引用全覆盖：FROM/JOIN/STRAIGHT_JOIN + 逗号隐式连接 + 反引号/库名限定，
+   另对系统库限定引用做独立兜底扫描（不依赖单一提取路径）。
+4. 强制 LIMIT：自动追加并钳制上限，杜绝全表拉取打爆生产库。
+5. 参数化：外部输入一律走 `%s` 占位符绑定（由 queries 层保证），护栏拒绝字面量拼接
    出的高危形态。
 
 本模块为**纯函数、零依赖**（不 import 数据库驱动），可完整离线单测。
@@ -53,6 +55,20 @@ METADATA_ALLOWED_OBJECTS = (
 _METADATA_SCHEMA_FILTER = re.compile(
     r"\btable_schema\s*(=|in)\s*", re.I
 )
+
+#: 元数据过滤值字面量（table_schema = 'imdb' / table_schema IN ('imdb','imdb2')）
+_SCHEMA_VALUE_EQ = re.compile(r"\btable_schema\s*=\s*'([^']*)'", re.I)
+_SCHEMA_VALUE_IN = re.compile(r"\btable_schema\s+in\s*\(([^)]*)\)", re.I)
+_SCHEMA_VALUE_IN_ITEM = re.compile(r"'([^']*)'")
+
+#: 任意位置的「库名.对象」限定引用（兜底扫描）：即便表提取被绕过，
+#: 对系统库的限定引用也必须在此拦截（纵深防御，不依赖单一提取路径）。
+_ANY_SCHEMA_QUALIFIED = re.compile(
+    r"\b(`?[A-Za-z_][\w$]*`?)\s*\.\s*(`?[A-Za-z_][\w$]*`?)", re.I
+)
+
+#: 任何通道都永远禁止引用的系统库（allow_metadata 也不放行）
+_ALWAYS_FORBIDDEN_SCHEMAS = ("mysql", "performance_schema", "sys")
 
 #: 禁止出现的语句关键字（覆盖写操作、事务控制、权限变更、落盘等）
 #: 整词匹配（\b...\b），避免 'truncated' 之类普通标识符误伤。
@@ -101,11 +117,21 @@ _READ_ONLY_CLAUSES = (
 _LINE_COMMENT = re.compile(r"(?m)(--|#)[^\n]*")
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 
-#: 表名提取（FROM / JOIN / INTO 之后的标识符，支持 `db`.`table` 与反引号）
+#: 表名提取（FROM / JOIN / STRAIGHT_JOIN 之后的标识符，支持 `db`.`table` 与反引号）。
+#: straight_join 必须显式列出：`\bjoin\b` 因前导下划线不匹配 `straight_join`。
 _TABLE_REF = re.compile(
-    r"\b(?:from|join)\s+(`?[A-Za-z_][\w$]*`?)(?:\s*\.\s*(`?[A-Za-z_][\w$]*`?))?",
+    r"\b(?:from|straight_join|join)\s+(`?[A-Za-z_][\w$]*`?)(?:\s*\.\s*(`?[A-Za-z_][\w$]*`?))?",
     re.I,
 )
+
+#: FROM 列表中的别名/终止符：逗号续扫时，别名位置遇到这些关键字即停止
+#: （防把 `WHERE a, b` / `GROUP BY a, b` / `ORDER BY a, b` 中的列名当成表）。
+_FROM_LIST_TERMINATORS = frozenset({
+    "on", "using", "where", "group", "order", "having", "limit", "offset",
+    "join", "straight_join", "inner", "left", "right", "cross", "natural",
+    "union", "except", "intersect", "into", "for", "lock", "procedure",
+    "as",  # AS 后必跟别名而非表；裸 AS 不续扫
+})
 
 #: 标识符（用于关键字扫描）
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
@@ -230,14 +256,47 @@ def _extract_cte_names(sql: str) -> set[str]:
 
 
 def _extract_tables(sql: str) -> list[str]:
-    """提取 SQL 引用到的表（含库名前缀），去重保序。"""
+    """提取 SQL 引用到的表（含库名前缀），去重保序。
+
+    覆盖三类引用形态：
+    1. `FROM` / `JOIN` / `STRAIGHT_JOIN` 之后的表（主正则 `_TABLE_REF`）；
+    2. 逗号隐式连接：`FROM a, b` / `FROM a AS x, b y`（从每个匹配处向后续扫，
+       别名位置遇 `_FROM_LIST_TERMINATORS` 关键字即停，避免把 WHERE/GROUP BY/
+       ORDER BY 后的列名误当表）；
+    3. 库名限定 `db.table` 与反引号标识符。
+    """
     out: list[str] = []
-    for m in _TABLE_REF.finditer(sql):
-        first = _unquote(m.group(1))
-        second = _unquote(m.group(2) or "")
+
+    def _add(first: str, second: str) -> None:
         full = f"{first}.{second}" if second else first
         if full and full not in out:
             out.append(full)
+
+    for m in _TABLE_REF.finditer(sql):
+        _add(_unquote(m.group(1)), _unquote(m.group(2) or ""))
+        # 逗号连接续扫：<table> [AS] alias , <table> ...
+        pos = m.end()
+        n = len(sql)
+        while pos < n:
+            cm = re.match(r"\s*,", sql[pos:])
+            if not cm:
+                # 无立即逗号：尝试跳过别名（AS alias / alias）后再找逗号
+                am = re.match(r"\s*(?:as\s+)?(`?[A-Za-z_][\w$]*`?)", sql[pos:], re.I)
+                if not am or _unquote(am.group(1)).lower() in _FROM_LIST_TERMINATORS:
+                    break
+                pos += am.end()
+                cm = re.match(r"\s*,", sql[pos:])
+                if not cm:
+                    break
+            pos += cm.end()
+            tm = re.match(
+                r"\s*(`?[A-Za-z_][\w$]*`?)(?:\s*\.\s*(`?[A-Za-z_][\w$]*`?))?",
+                sql[pos:], re.I,
+            )
+            if not tm:
+                break
+            _add(_unquote(tm.group(1)), _unquote(tm.group(2) or ""))
+            pos += tm.end()
     return out
 
 
@@ -378,9 +437,11 @@ def _clamp_limit(sql: str, max_limit: int) -> str:
     return f"{sql} LIMIT {max_limit}"
 
 
-def _check_metadata_sql(sql: str) -> list[str]:
+def _check_metadata_sql(sql: str, allowed_schemas: tuple = ALLOWED_SCHEMAS) -> list[str]:
     """校验元数据只读通道的 SQL：仅允许 information_schema 的只读元数据对象，
-    且必须带 table_schema 过滤（防全实例元数据扫描）。返回引用的表名。
+    且必须带 table_schema 过滤（防全实例元数据扫描）；过滤**字面量值**必须在
+    白名单库内（参数化占位符无法静态校验，由内部调用方保证绑定白名单值）。
+    返回引用的表名。
     """
     tables = _extract_tables(sql)
     for t in tables:
@@ -396,6 +457,18 @@ def _check_metadata_sql(sql: str) -> list[str]:
     if not _METADATA_SCHEMA_FILTER.search(sql):
         raise ReadOnlyViolation(
             "元数据通道必须带 table_schema 过滤条件（防全实例元数据扫描）")
+    # 过滤值校验：字面量库名必须在白名单内（防 table_schema='mysql' 探测系统库）
+    allowed = tuple(s.lower() for s in (allowed_schemas or ALLOWED_SCHEMAS))
+    values: list[str] = []
+    for m in _SCHEMA_VALUE_EQ.finditer(sql):
+        values.append(m.group(1))
+    m_in = _SCHEMA_VALUE_IN.search(sql)
+    if m_in:
+        values.extend(_SCHEMA_VALUE_IN_ITEM.findall(m_in.group(1)))
+    for v in values:
+        if v.strip().lower() not in allowed:
+            raise ReadOnlyViolation(
+                f"元数据过滤值仅允许库 {allowed}，收到：{v}")
     return tables
 
 
@@ -444,6 +517,18 @@ def check_sql(sql: str, max_limit: int = DEFAULT_MAX_LIMIT,
     if bad_fn:
         raise ReadOnlyViolation(f"拒绝包含禁用函数的语句：{bad_fn}")
 
+    # 5.5) 兜底扫描：任何「库名.对象」限定引用中的系统库一律拒绝。
+    #      不依赖 _TABLE_REF 提取路径——即便逗号连接/STRAIGHT_JOIN 等形态漏扫，
+    #      对 mysql/performance_schema/sys 的限定引用也在此拦截（纵深防御）。
+    #      在掩码视图上扫描：字符串字面量内容不算表引用（防影片名误伤）；
+    #      反引号限定引用（`mysql`.`user`）由 _TABLE_REF（支持反引号）覆盖。
+    for m in _ANY_SCHEMA_QUALIFIED.finditer(masked):
+        sch = _unquote(m.group(1)).lower()
+        if sch in _ALWAYS_FORBIDDEN_SCHEMAS:
+            raise ReadOnlyViolation(f"拒绝访问受限模式：{sch}")
+        if sch == "information_schema" and not allow_metadata:
+            raise ReadOnlyViolation("拒绝访问受限模式：information_schema")
+
     # 6) 表白名单（CTE 名不是物理表，跳过）
     schemas = tuple(s.lower() for s in (allowed_schemas or ALLOWED_SCHEMAS))
     cte_names = _extract_cte_names(stripped)
@@ -452,7 +537,7 @@ def check_sql(sql: str, max_limit: int = DEFAULT_MAX_LIMIT,
     if is_meta:
         if not allow_metadata:
             raise ReadOnlyViolation("拒绝访问受限模式：information_schema")
-        tables = _check_metadata_sql(stripped)
+        tables = _check_metadata_sql(stripped, schemas)
     else:
         for t in tables:
             parts = t.split(".")
