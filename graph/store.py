@@ -167,7 +167,7 @@ class MysqlGraphFetcher:
                 imdb_ids.append(iid.split(":", 1)[1])
         if douban_pks:
             rows = self._fetch(
-                "SELECT id, douban_id, title_text_cn, original_title, "
+                "SELECT id, douban_id, imdb_id, title_text_cn, original_title, "
                 "release_date_year, rating, rating_count, genres, country "
                 "FROM douban_main WHERE id IN :pks",
                 {"pks": douban_pks},
@@ -182,6 +182,11 @@ class MysqlGraphFetcher:
                     "genres": m["genres"] or "",
                     "country": m["country"] or "",
                     "douban_id": str(m.get("douban_id") or ""),
+                    # P1-6：豆瓣候选必须带 imdb_id——work_key 优先以 imdb_id 归并
+                    # 双源同片，缺它则 relation/graph/person 产出的豆瓣候选与
+                    # content 召回的同片各成一个 work，结果列表出现重复影片，
+                    # 且曝光/反馈按不同 id 双计。
+                    "imdb_id": str(m.get("imdb_id") or ""),
                 }
         if imdb_ids:
             rows = self._fetch(
@@ -258,7 +263,11 @@ class KnowledgeGraphStore:
         item_ids: list[str] = []
         seen: set[str] = set()
         for pk in pkeys:
-            for rel in self._person_relations(pk):
+            # 走公开 GraphFetcher 接口 relations_from（经 _neighbors 缓存）：
+            # 曾误写 self._person_relations(pk)——那是 MysqlGraphFetcher 的私有
+            # 方法，KnowledgeGraphStore 上不存在，person_recall 必抛
+            # AttributeError 被 runner 吞掉返回空，by_person 整条链路静默失效。
+            for rel in self._neighbors(pk):
                 obj = rel.obj
                 if (obj.startswith("douban:") or obj.startswith("imdb:")) and obj not in seen:
                     seen.add(obj)

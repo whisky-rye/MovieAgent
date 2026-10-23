@@ -46,6 +46,10 @@ def content_recall(
         vec = emb.embed_query(query)
     else:
         vecs = backend.get_embeddings([item_id])
+        if not vecs:
+            # P1-7：历史会话引用的 item 已不在向量库时，曾因 vecs[0] 直接
+            # IndexError 让整个请求失败；降级为「该路无候选」由其它路/冷启动兜底
+            return []
         vec = vecs[0]
 
     rows = backend.query(vec, top_k=top_k, where=where or None, genres=genres)

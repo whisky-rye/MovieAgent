@@ -123,7 +123,10 @@ def _parse_intent(state: AgentState) -> AgentState:
                            HumanMessage(content=query)])
         thinking = _extract_thinking(resp)
         slots = _extract_json(strip_think(resp.content))
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - 解析失败走启发式，但必须留痕（P1-8）
+        # 曾是裸 except：云端全熔断/网络中断时每请求静默走 heuristic，
+        # 主链路故障在日志里毫无痕迹，排障只能看到最终答案异常
+        logger.warning("意图解析 LLM 失败，走启发式兜底: %s", e)
         slots = None
     if not slots:
         slots = _heuristic(query)
@@ -177,7 +180,10 @@ def _resolve_item_id(title: str) -> str | None:
     try:
         cands = content_recall(query=title, top_k=1)
         return cands[0].id if cands else None
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - 定位失败退化为文本召回，但必须留痕（P1-8）
+        # 曾是裸 except：向量库故障/超时会被静默改成文本召回，用户得到
+        # 「不相似的相似推荐」且无迹可查
+        logger.warning("作品定位失败（similar 退化为文本召回）: %s", e)
         return None
 
 
@@ -380,8 +386,14 @@ def _reflect(state: AgentState) -> AgentState:
                          elapsed_ms=elapsed)
         _append_step(state, step)
         return {"ranked": ranked, "steps": [step]}
-    except Exception:
-        return {}
+    except Exception as e:  # noqa: BLE001 - 兜底失败不阻断，但必须留痕（P1-8）
+        # 曾是裸 except return {}：候选不足时冷启动兜底再失败（向量库故障等），
+        # 用户拿到「基于 0-4 部候选」的空洞回答，日志却毫无痕迹
+        logger.warning("冷启动兜底失败（reflect 降级）: %s", e, exc_info=True)
+        step = _new_step(state, "reflect", "retrieval", "冷启动兜底失败",
+                         detail={"error": str(e)[:200]}, elapsed_ms=int((time.time() - t0) * 1000))
+        _append_step(state, step)
+        return {"steps": [step]}
 
 
 def _generate(state: AgentState) -> AgentState:

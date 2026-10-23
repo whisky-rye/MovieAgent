@@ -100,9 +100,27 @@ def explain_recommendation(query: str, top_k: int = 6) -> str:
 
 # ---- RUNNERS：供 LangGraph 节点直接取 Candidate 列表做融合 ----
 
+def _safe_recall(fn, *args, **kwargs) -> list[Candidate]:
+    """单路召回隔离（P1-7）：任一路失败降级为空列表，绝不让整条 recommend 500。
+
+    此前仅 person/prod 路有降级，similar 的三路与 by_text 主路都是裸调——
+    向量库 / 关系查询 / 图谱遍历任一抖动都会让整个请求失败。降级后由
+    reflect 的冷启动兜底补候选，主链路不中断（失败有 warning 日志留痕）。
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - 单路失败绝不阻断主链路
+        logger.warning(
+            "单路召回失败（降级跳过该路）: %s", getattr(fn, "__name__", str(fn)),
+            exc_info=True,
+        )
+        return []
+
+
 def _run_search_by_text(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:
     g = slots.get("genres") or prefs.get("genres")
-    return content_recall(
+    return _safe_recall(
+        content_recall,
         query=slots.get("query") or "",
         top_k=top_k,
         genres=g or None,
@@ -113,10 +131,13 @@ def _run_search_by_text(slots: dict, prefs: dict, top_k: int = 20) -> list[Candi
 
 
 def _run_search_similar(item_id: str, top_k: int = 20) -> list[Candidate]:
-    sim = content_recall(item_id=item_id, top_k=top_k)
-    rel = relation_recall(item_id=item_id, top_k=top_k)
+    # P1-7：三路各自隔离——一路失败只丢该路候选，不拖垮整条 similar 召回
+    sim = _safe_recall(content_recall, item_id=item_id, top_k=top_k)
+    rel = _safe_recall(relation_recall, item_id=item_id, top_k=top_k)
     # F1/O12：知识图谱多跳扩展，与内容/关系召回一并融合，覆盖「同导演其它作品」「合作网络」等
-    graph_cands = graph_recall(item_id, top_k=top_k)
+    graph_cands = _safe_recall(graph_recall, item_id, top_k=top_k)
+    if not (sim or rel or graph_cands):
+        return []
     fused = rerank(
         {"content": sim, "relation": rel, "graph": graph_cands},
         strategy="score", top_k=top_k,
@@ -126,7 +147,7 @@ def _run_search_similar(item_id: str, top_k: int = 20) -> list[Candidate]:
 
 def _run_search_graph(item_id: str, top_k: int = 20) -> list[Candidate]:
     """知识图谱多跳召回（独立召回路，可直接并入 plan）。"""
-    return graph_recall(item_id, top_k=top_k)
+    return _safe_recall(graph_recall, item_id, top_k=top_k)
 
 
 def _run_search_by_person(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidate]:

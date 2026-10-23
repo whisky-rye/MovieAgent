@@ -49,7 +49,7 @@ def _relation_douban(item_id: str, top_k: int) -> list[Candidate]:
     if not dids:
         return []
     mains = fetch_all(
-        "SELECT id, douban_id, title_text_cn, original_title, release_date_year, "
+        "SELECT id, douban_id, imdb_id, title_text_cn, original_title, release_date_year, "
         "rating, rating_count, genres, country "
         "FROM douban_main WHERE douban_id IN :dids",
         {"dids": dids},
@@ -75,6 +75,9 @@ def _relation_douban(item_id: str, top_k: int) -> list[Candidate]:
             recall_source="relation",
             score=float(r["shared"]),
             douban_id=str(m.get("douban_id") or ""),
+            # P1-6：补 imdb_id，使 work_key 能与 content 召回的豆瓣同片归并
+            # （此前缺它 → similar 意图下同一部影片出现两条，且曝光/反馈双计）
+            imdb_id=str(m.get("imdb_id") or ""),
         ))
     return out[:top_k]
 
