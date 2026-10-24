@@ -16,6 +16,7 @@ Milvus Lite 单文件）。生产再切集群版。
 各后端统一返回 (id, document, metadata, distance) 升序，distance 越低越相似（与 Chroma 一致）。
 """
 import hashlib
+import threading
 from abc import ABC, abstractmethod
 
 import chromadb
@@ -325,17 +326,41 @@ class MilvusBackend(VectorBackend):
         return out
 
 
+# P2-1：按 (backend, collection) 维度复用的客户端单例表 + 锁
+_BACKEND_SINGLETONS: dict[tuple[str, str], "VectorBackend"] = {}
+_BACKEND_LOCK = threading.Lock()
+
+
 def get_vector_backend(collection: str | None = None) -> VectorBackend:
     """工厂：按 settings.VECTOR_BACKEND 选择实现（配置切换，业务零改动）。
 
     collection 省略时走 default_collection()（影片语料集合）；传入自定义集合名
     可复用同一底层存储承载其它索引（如语义缓存的 query_cache 集合）。
+
+    P2-1：按 (backend, collection) **进程级单例**——content_recall 每请求都会取
+    客户端，此前每次 new；chroma/qdrant/milvus 嵌入式模式下反复开同一存储路径
+    既有对象 churn + 元数据往返，也与 semcache 的单例（同 path）存在文件锁竞争
+    风险。与 graph/store.get_graph_store 的单例先例一致；配置变更（backend 或
+    集合名变化）自动重建，测试可用 _reset_vector_backends() 清空。
     """
     name = collection or default_collection()
-    if settings.VECTOR_BACKEND == "chroma":
-        return ChromaBackend(collection=name)
-    if settings.VECTOR_BACKEND == "qdrant":
-        return QdrantBackend(collection=name)
-    if settings.VECTOR_BACKEND == "milvus":
-        return MilvusBackend(collection=name)
-    raise ValueError(f"未知 VECTOR_BACKEND: {settings.VECTOR_BACKEND}")
+    key = (settings.VECTOR_BACKEND, name)
+    with _BACKEND_LOCK:
+        be = _BACKEND_SINGLETONS.get(key)
+        if be is None:
+            if settings.VECTOR_BACKEND == "chroma":
+                be = ChromaBackend(collection=name)
+            elif settings.VECTOR_BACKEND == "qdrant":
+                be = QdrantBackend(collection=name)
+            elif settings.VECTOR_BACKEND == "milvus":
+                be = MilvusBackend(collection=name)
+            else:
+                raise ValueError(f"未知 VECTOR_BACKEND: {settings.VECTOR_BACKEND}")
+            _BACKEND_SINGLETONS[key] = be
+        return be
+
+
+def _reset_vector_backends() -> None:
+    """清空单例（测试/配置热切换用）。"""
+    with _BACKEND_LOCK:
+        _BACKEND_SINGLETONS.clear()
