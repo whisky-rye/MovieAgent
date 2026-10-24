@@ -5,17 +5,21 @@
 
 分页说明（修复「全量 SELECT 一次性 .all() 拉爆内存」问题）：
   - 数据库实际为 1:1 关系（经核查：douban_main=1072/douban_text=1072，imdb_main=62/imdb_text=60，
-    仅 2 条 imdb_main 无 text 行，由 LEFT JOIN 正确处理）。故对每个主表加
-    `ORDER BY <pk> LIMIT :lim OFFSET :off` 子查询分页即可，分页边界精确、无错位。
+    仅 2 条 imdb_main 无 text 行，由 LEFT JOIN 正确处理）。故对每个主表分页拉取，
+    分页边界精确、无错位。
+  - P2-5：分页方式为**键集分页**（`WHERE <pk> > :last ORDER BY <pk> LIMIT :lim`）而非
+    深 OFFSET——OFFSET 越深数据库要越过的行越多（55 万全量建库后半程每页都从头扫描），
+    键集分页每页都从主键索引位置开始，成本恒定。
   - `build_corpus()` 仍返回全量列表（向后兼容探针脚本）；`_iter_douban/_iter_imdb/iter_corpus`
-    为流式分页生成器，供建库脚本逐页消费，内存恒定受 DEFAULT_PAGE_SIZE 约束。
+    为流式分页生成器，供建库脚本逐页消费，内存恒定受 settings.BUILD_PAGE_SIZE 约束
+    （函数内读取，勿在导入期绑定默认值）。
 """
 import re
 from sqlalchemy import create_engine, text
 from config.settings import settings
 
-_DEFAULT_PAGE_SIZE = settings.BUILD_PAGE_SIZE  # 每页从 MySQL 拉取的主表行数
-
+# 注意：分页大小一律在函数内读 settings.BUILD_PAGE_SIZE（P2-5）——模块级默认参数
+# 会在导入期绑定，导致测试 monkeypatch settings 不生效。
 _SYNC_DSN = settings.MYSQL_DSN.replace("mysql+aiomysql", "mysql+pymysql")
 
 
@@ -90,30 +94,39 @@ def _row_to_douban_rec(r: dict) -> dict:
     }
 
 
-def _iter_douban(page_size: int = _DEFAULT_PAGE_SIZE):
-    """流式分页生成器：每页最多 page_size 条 recs（list）。内存恒定，适合全量建库。"""
+def _iter_douban(page_size: int | None = None):
+    """流式分页生成器：每页最多 page_size 条 recs（list）。内存恒定，适合全量建库。
+
+    P2-5：键集分页（WHERE id > :last ORDER BY id LIMIT）替代深 OFFSET——
+    OFFSET 越深数据库要越过的行越多（55 万全量建库后半程每页都从头扫描），
+    键集分页每页都从主键索引位置开始，成本恒定。
+    page_size 省略时**函数内**取 settings.BUILD_PAGE_SIZE（模块级默认参数在
+    导入期绑定，测试 monkeypatch settings 不生效）。
+    """
+    page_size = page_size or settings.BUILD_PAGE_SIZE
     eng = create_engine(_SYNC_DSN)
     sql = text(
         "SELECT m.id, m.title_text_cn, m.original_title, m.release_date_year, m.genres, m.country, "
         "m.rating, m.rating_count, m.director_name, "
         "t.description, t.plot, t.tags "
-        "FROM (SELECT * FROM douban_main ORDER BY id LIMIT :lim OFFSET :off) m "
+        "FROM (SELECT * FROM douban_main WHERE id > :last ORDER BY id LIMIT :lim) m "
         "LEFT JOIN douban_text t ON m.id = t.id"
     )
-    offset = 0
+    last = 0
     while True:
         with eng.connect() as c:
-            rows = c.execute(sql, {"lim": page_size, "off": offset}).mappings().all()
+            rows = c.execute(sql, {"lim": page_size, "last": last}).mappings().all()
         if not rows:
             return
         page = [rec for r in rows if (rec := _row_to_douban_rec(r)) is not None]
         yield page
         if len(rows) < page_size:
             return
-        offset += page_size
+        last = rows[-1]["id"]
 
 
-def _build_douban(page_size: int = _DEFAULT_PAGE_SIZE) -> list[dict]:
+def _build_douban(page_size: int | None = None) -> list[dict]:
+    page_size = page_size or settings.BUILD_PAGE_SIZE
     recs = []
     for page in _iter_douban(page_size):
         recs.extend(page)
@@ -160,29 +173,32 @@ def _row_to_imdb_rec(r: dict) -> dict:
     }
 
 
-def _iter_imdb(page_size: int = _DEFAULT_PAGE_SIZE):
+def _iter_imdb(page_size: int | None = None):
+    """流式分页生成器（P2-5：键集分页，见 _iter_douban 说明；imdb 主键为字符串）。"""
+    page_size = page_size or settings.BUILD_PAGE_SIZE
     eng = create_engine(_SYNC_DSN)
     sql = text(
         "SELECT m.imdb_id, m.title_text_cn, m.title_text, m.release_date_year, m.genres, m.country, "
         "m.director_name, m.rate_agg, m.rate_votes, "
         "t.plot_text, t.plot_keywords, t.tagline "
-        "FROM (SELECT * FROM imdb_main ORDER BY imdb_id LIMIT :lim OFFSET :off) m "
+        "FROM (SELECT * FROM imdb_main WHERE imdb_id > :last ORDER BY imdb_id LIMIT :lim) m "
         "LEFT JOIN imdb_text t ON m.imdb_id = t.imdb_id"
     )
-    offset = 0
+    last = ""
     while True:
         with eng.connect() as c:
-            rows = c.execute(sql, {"lim": page_size, "off": offset}).mappings().all()
+            rows = c.execute(sql, {"lim": page_size, "last": last}).mappings().all()
         if not rows:
             return
         page = [rec for r in rows if (rec := _row_to_imdb_rec(r)) is not None]
         yield page
         if len(rows) < page_size:
             return
-        offset += page_size
+        last = rows[-1]["imdb_id"]
 
 
-def _build_imdb(page_size: int = _DEFAULT_PAGE_SIZE) -> list[dict]:
+def _build_imdb(page_size: int | None = None) -> list[dict]:
+    page_size = page_size or settings.BUILD_PAGE_SIZE
     recs = []
     for page in _iter_imdb(page_size):
         recs.extend(page)
@@ -195,8 +211,9 @@ def _clean_meta(meta: dict) -> dict:
     return {k: v for k, v in meta.items() if not (isinstance(v, list) and len(v) == 0)}
 
 
-def iter_corpus(page_size: int = _DEFAULT_PAGE_SIZE):
+def iter_corpus(page_size: int | None = None):
     """流式分页生成器：依次产出豆瓣页、IMDb 页（每页 list[rec]）。建库脚本逐页消费，内存恒定。"""
+    page_size = page_size or settings.BUILD_PAGE_SIZE
     yield from _iter_douban(page_size)
     yield from _iter_imdb(page_size)
 

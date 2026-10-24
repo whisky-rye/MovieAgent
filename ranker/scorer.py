@@ -150,18 +150,38 @@ def mmr_diversify(
     lambda_div: float = 0.3,
     top_k: int | None = None,
 ) -> list[Candidate]:
-    """以类型重叠作为距离代理的 MMR 重排，提升结果多样性（避免清一色同类型）。"""
+    """以类型重叠作为距离代理的 MMR 重排，提升结果多样性（避免清一色同类型）。
+
+    P2-5：预计算候选类型集合（frozenset）+ 「已选标记」单遍扫描，替代旧实现的
+    `remain.remove(best)`（每轮 O(n) 删除）与每轮重复 set 构造；选择语义逐位
+    保持一致（mmr 严格大于才换、并列取输入序在前者），因此重排结果与旧实现
+    完全一致（可对比验证），只是去掉常数级浪费、避免 top_k 放大时的平方删除。
+    """
     if not cands:
         return []
+    gsets = [frozenset(c.genres or ()) for c in cands]
+    n = len(cands)
+    limit = n if top_k is None else min(top_k, n)
+    chosen = [False] * n
     selected: list[Candidate] = []
-    remain = list(cands)
-    while remain and (top_k is None or len(selected) < top_k):
-        best, best_score = None, -1e9
-        for c in remain:
-            sim = max((_genre_overlap(c, s) for s in selected), default=0.0)
-            mmr = (1 - lambda_div) * c.score - lambda_div * sim
+    sel_sets: list[frozenset] = []   # 仅收非空类型集（空集重叠恒 0，无需参与比较）
+    while len(selected) < limit:
+        best_idx, best_score = -1, -1e9
+        for i in range(n):
+            if chosen[i]:
+                continue
+            gi = gsets[i]
+            sim = 0.0
+            if gi and sel_sets:
+                # 与已选集合的最大 Jaccard 重叠（与 _genre_overlap 同式）
+                sim = max(len(gi & s) / len(gi | s) for s in sel_sets)
+            mmr = (1 - lambda_div) * cands[i].score - lambda_div * sim
             if mmr > best_score:
-                best, best_score = c, mmr
-        selected.append(best)
-        remain.remove(best)
+                best_idx, best_score = i, mmr
+        if best_idx < 0:
+            break
+        chosen[best_idx] = True
+        selected.append(cands[best_idx])
+        if gsets[best_idx]:
+            sel_sets.append(gsets[best_idx])
     return selected
