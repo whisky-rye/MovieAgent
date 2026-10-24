@@ -164,6 +164,11 @@ class Settings(BaseSettings):
     METRICS_ENABLED: bool = True          # 总开关；False 则停止埋点（零开销）
     PROMETHEUS_ENABLED: bool = True       # GET /metrics（Prometheus 文本格式）开关
     DASHBOARD_ENABLED: bool = True        # GET /admin/dashboard（HTML 看板）与 /admin/stats（JSON）开关
+    # 监控端点独立访问令牌（P1-4）：配置后 /metrics、/admin/* 必须携带匹配的
+    # X-Admin-Token 头（恒定时间比较）——监控端点暴露内部指标/告警/日志链路
+    # 摘要（错误率、峰值路径、熔断状态），属侦察面，不应依赖用户鉴权开关。
+    # 留空则退回用户鉴权（AUTH_ENABLED=true 时需登录；调试态开放，启动有告警）。
+    METRICS_ADMIN_TOKEN: str = ""
     ALERT_WEBHOOK_URL: str = ""          # 告警回调（钉钉/飞书/Slack incoming webhook）；空=仅落日志
     ALERT_EVAL_INTERVAL: int = 60        # 后台告警评估周期（秒）；0=关闭后台循环（仍可在 /admin/stats 手动触发）
     # —— 告警阈值（基于指标快照评估）——

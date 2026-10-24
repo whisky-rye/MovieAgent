@@ -76,6 +76,15 @@ def validate_security_config() -> None:
             "鉴权安全校验通过：AUTH_ENABLED=true，token 强制鉴权 + CSRF 双提交 + "
             "Secure Cookie 均已生效。"
         )
+    # P1-4：监控端点（/metrics、/admin/*）暴露内部指标/告警/日志链路摘要，
+    # 若既未配置独立 Admin Token 又未开启鉴权，任何人可读——显式告警。
+    if ((settings.PROMETHEUS_ENABLED or settings.DASHBOARD_ENABLED)
+            and not settings.METRICS_ADMIN_TOKEN and not settings.AUTH_ENABLED):
+        logger_api.warning(
+            "[安全] 监控端点（/metrics、/admin/*）既未配置 METRICS_ADMIN_TOKEN 也未开启"
+            "鉴权（AUTH_ENABLED=false）：任何人可读内部指标/告警/日志链路摘要。"
+            "生产部署请设置 METRICS_ADMIN_TOKEN 或开启鉴权。"
+        )
 
 
 @asynccontextmanager
@@ -440,6 +449,11 @@ class RecommendReq(BaseModel):
 class ChatReq(BaseModel):
     query: str = Field(..., min_length=1)
     user_id: str = "default"
+    # P1-3：/chat 原先不接 session_id —— 永远无历史上下文、永不落库，
+    # "流式对话"实际是单轮玩具；现与 /recommend/stream 对齐。
+    session_id: Optional[str] = Field(
+        default=None, description="会话 ID（多会话管理；空=临时对话不落库、不带历史）"
+    )
 
 
 @app.get("/health")
@@ -583,7 +597,10 @@ async def chat(
     request_id = request.state.request_id
     async def gen():
         try:
-            state = await asyncio.to_thread(_run, req.query, auth.user_id, request_id)
+            # P1-3：透传 session_id —— _run 据此加载历史上下文（多轮连贯）
+            state = await asyncio.to_thread(
+                _run, req.query, auth.user_id, request_id, req.session_id
+            )
         except RateLimited as e:  # 流式接口无法回 429 状态码，推提示文本
             yield f"请求过于频繁，请 {max(1, int(e.retry_after))} 秒后再试。\n"
             return
@@ -603,6 +620,14 @@ async def chat(
             if ch:
                 yield ch
                 await asyncio.sleep(0.01)
+        # G3：done 后落会话（与 /recommend/stream 一致：带 session_id 且归属校验
+        # 通过才写；异步线程不阻塞流式返回）。P1-3 前 /chat 无此段，会话永不落库。
+        if req.session_id:
+            await asyncio.to_thread(
+                _persist_session, req.session_id, auth.user_id, req.query,
+                {"answer": answer, "items": state.get("items", []),
+                 "steps": state.get("steps", []), "thinking": state.get("thinking", {})},
+            )
 
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
 

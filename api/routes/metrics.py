@@ -7,12 +7,20 @@
 
 HTML 渲染逻辑在 observability/dashboard.py（与 HTTP 层解耦、可离线单测）。
 所有端点均受 METRICS_ENABLED / DASHBOARD_ENABLED / PROMETHEUS_ENABLED 开关控制。
+
+访问控制（P1-4）：监控端点暴露内部指标/告警/日志链路摘要（错误率、峰值路径、
+熔断状态），属侦察面。整个 router 挂 require_metrics_access：
+- 配置 METRICS_ADMIN_TOKEN → 必须携带匹配的 X-Admin-Token 头（或 HTML 看板
+  用 ?token= 查询参数，便于浏览器直接打开；恒定时间比较）；
+- 未配置 → 退回用户鉴权（AUTH_ENABLED=true 需登录；调试态开放，启动有告警）。
 """
+import hmac
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+from api.deps import get_current_user
 from config.settings import settings
 from observability.metrics import metrics
 from observability.alerting import evaluate_alerts, emit_alerts
@@ -20,7 +28,28 @@ from observability.log_analyzer import analyze_log_dir
 from observability.dashboard import render_dashboard_html
 
 logger = logging.getLogger("movie_agent.metrics")
-router = APIRouter()
+
+
+async def require_metrics_access(request: Request) -> None:
+    """监控端点访问控制（P1-4，router 级依赖）。
+
+    与用户鉴权开关解耦：监控是运维面而非用户面，即便 AUTH_ENABLED=false 的
+    调试部署，也可用 METRICS_ADMIN_TOKEN 把端点锁起来。
+    """
+    if settings.METRICS_ADMIN_TOKEN:
+        submitted = (request.headers.get("X-Admin-Token")
+                     or request.query_params.get("token", ""))
+        if not submitted or not hmac.compare_digest(submitted, settings.METRICS_ADMIN_TOKEN):
+            raise HTTPException(
+                status_code=401,
+                detail="监控端点需要有效的 Admin Token（X-Admin-Token 头或 ?token= 参数）",
+            )
+        return
+    # 未配置独立 token：退回用户鉴权（生产需登录；调试态开放，启动有显式告警）
+    await get_current_user(request)
+
+
+router = APIRouter(dependencies=[Depends(require_metrics_access)])
 
 
 def _thresholds() -> dict:
