@@ -12,7 +12,7 @@ fusion_detail 含每片「各路排名来源与贡献」，供 graph 步骤可�
 """
 import logging
 from typing import Optional
-from retrieval.candidates import Candidate
+from retrieval.candidates import Candidate, sort_by_score
 from config.settings import settings
 from ranker.scorer import fuse, mmr_diversify
 from ranker.rrf import rrf_fuse
@@ -120,7 +120,7 @@ def rerank(
                 cands = llm_rerank(head, query, top_k=llm_topn) + tail
         else:
             # 无 query 时精排退化为按融合分排序（与 llm_rerank 内部一致）
-            cands = sorted(cands, key=lambda x: x.score, reverse=True)
+            cands = sort_by_score(cands)
 
     # 最终按 top_k 收口（MMR 已尊重 top_k；此处为 LLM 阶段后的兜底裁剪）
     if top_k:

@@ -123,3 +123,15 @@ def normalize_genres(values) -> list[str]:
         if g in KNOWN_GENRES and g not in out:
             out.append(g)
     return out
+
+
+def sort_by_score(cands: list["Candidate"]) -> list["Candidate"]:
+    """按综合分降序，**同分按 id 升序**（确定性 tie-break，P2-6）。
+
+    背景：各处 `sorted(..., key=lambda c: c.score, reverse=True)` 在同分时依赖
+    输入顺序（融合字典序 / 召回返回序），跨请求不稳定——同样的查询换个会话或
+    换批候选，同分影片的先后会飘，用户感知为「结果顺序随机变化」，也让缓存与
+    对比测试难以复现。加次级键 id（全局唯一、稳定）后，任意输入顺序下排序结果
+    完全确定。
+    """
+    return sorted(cands, key=lambda c: (-float(c.score), str(c.id)))

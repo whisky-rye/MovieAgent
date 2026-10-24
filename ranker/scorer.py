@@ -1,6 +1,6 @@
 """排序打分：多路召回融合 + 质量/偏好加权 + MMR 多样性。"""
 from typing import Optional
-from retrieval.candidates import Candidate, work_key, merge_candidate
+from retrieval.candidates import Candidate, merge_candidate, sort_by_score, work_key
 
 # 各召回来源的默认融合权重（内容相似最高，关系次之，冷启动兜底最低）
 _DEFAULT_WEIGHTS = {"content": 1.0, "relation": 0.8, "coldstart": 0.6}
@@ -34,6 +34,11 @@ def _quality_pref(c: Candidate, user_genres: list[str] | None) -> tuple[float, f
 
 # 回灌强度（与 agent/feedback_store 对称；集中在此便于调参）
 GENRE_AFFINITY_SCALE = 0.3
+# 反馈类型亲和度的总贡献上限（P2-6）：与自述偏好分（_quality_pref 的 pref
+# 封顶 0.3）一致——多类型候选的亲和度累加此前无上限，一部片命中 5 个高亲和
+# 类型时该项可达 1.5，足以压倒质量分/融合信号；封顶后反馈信号不越过用户
+# 自述口径，且正负对称（过度踩的类型组合也不能把片沉到底）。
+_GENRE_AFFINITY_MAX = 0.3
 
 
 def _feedback_term(c: Candidate, profile: dict | None) -> float:
@@ -56,7 +61,9 @@ def _feedback_term(c: Candidate, profile: dict | None) -> float:
         t += float(boost[aid])
     ga = profile.get("genre_affinity") or {}
     if ga and c.genres:
-        t += sum(ga.get(g, 0.0) for g in c.genres) * GENRE_AFFINITY_SCALE
+        raw = sum(ga.get(g, 0.0) for g in c.genres) * GENRE_AFFINITY_SCALE
+        # P2-6：封顶（正负对称），见 _GENRE_AFFINITY_MAX 注释
+        t += max(-_GENRE_AFFINITY_MAX, min(_GENRE_AFFINITY_MAX, raw))
     return t
 
 
@@ -124,7 +131,7 @@ def fuse(
                     "strategy": "score",
                 }
 
-    ranked = sorted(merged.values(), key=lambda x: x.score, reverse=True)
+    ranked = sort_by_score(list(merged.values()))
     if top_k:
         ranked = ranked[:top_k]
     for i, c in enumerate(ranked, 1):

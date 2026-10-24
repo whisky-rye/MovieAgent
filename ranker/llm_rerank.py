@@ -10,7 +10,7 @@ invoke——cloud 不可用回退本地时一次请求 30 次串行 LLM 调用�
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from retrieval.candidates import Candidate
+from retrieval.candidates import Candidate, sort_by_score
 from llm.factory import get_light
 
 _PROMPT = (
@@ -73,7 +73,7 @@ def llm_rerank(
     P2-2：打分并发执行（见模块头）；结果按候选原位映射，排序语义不变。
     """
     if not query:
-        cands = sorted(cands, key=lambda c: c.score, reverse=True)
+        cands = sort_by_score(cands)
         return cands[:top_k] if top_k else cands
     llm = _get_llm()
     if len(cands) > 1:
@@ -86,5 +86,5 @@ def llm_rerank(
         Candidate(**{**_cand_dict(c), "score": 0.7 * c.score + 0.3 * s})
         for c, s in zip(cands, scores)
     ]
-    scored.sort(key=lambda x: x.score, reverse=True)
+    scored = sort_by_score(scored)
     return scored[:top_k] if top_k else scored

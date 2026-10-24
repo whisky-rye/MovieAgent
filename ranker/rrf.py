@@ -8,7 +8,7 @@
 融合后再叠加与原 fuse 一致的质量分/偏好分，使融合信号与「高分/偏好优先」同日而语，
 并最终仍过 MMR / 可选 LLM 精排（见 rerank）。v2.14 由 config.FUSION_STRATEGY 切换。
 """
-from retrieval.candidates import Candidate, work_key, merge_candidate
+from retrieval.candidates import Candidate, merge_candidate, sort_by_score, work_key
 from ranker.scorer import _as_dict, _quality_pref, _feedback_term
 
 # 顶层召回 dict 的 key（graph 规划名）映射到规范来源权重键，
@@ -111,7 +111,7 @@ def rrf_fuse(
             "strategy": "rrf",
         }
 
-    ranked = sorted(merged.values(), key=lambda x: x.score, reverse=True)
+    ranked = sort_by_score(list(merged.values()))
     if top_k:
         ranked = ranked[:top_k]
     for i, c in enumerate(ranked, 1):

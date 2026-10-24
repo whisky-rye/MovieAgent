@@ -19,7 +19,7 @@ import logging
 
 import requests
 from config.settings import settings
-from retrieval.candidates import Candidate
+from retrieval.candidates import Candidate, sort_by_score
 
 logger = logging.getLogger("movie_agent.ranker.cloud_rerank")
 
@@ -194,7 +194,7 @@ def cloud_rerank(
     这样切换 provider 时排序风格稳定、可对比。
     """
     if not query or not cands:
-        cands = sorted(cands, key=lambda c: c.score, reverse=True)
+        cands = sort_by_score(cands)
         return cands[:top_k] if top_k else cands
     client = _get_client()
     docs = [CloudRerankClient._doc_text(c) for c in cands]
@@ -206,5 +206,5 @@ def cloud_rerank(
         c = cands[idx]
         fused = _FUSION_W * c.score + _RERANK_W * rel
         scored.append(Candidate(**{**_cand_dict(c), "score": fused}))
-    scored.sort(key=lambda x: x.score, reverse=True)
+    scored = sort_by_score(scored)
     return scored[:top_k] if top_k else scored
