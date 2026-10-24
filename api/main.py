@@ -355,16 +355,21 @@ def _build_history(session_id: Optional[str]) -> str:
 
 
 def _log_impressions(user_id: str, query: str, ranked: list) -> None:
-    """O11：把当次推荐结果批量记为曝光（impression），rank 即名次，供反馈聚合做位置偏差校正。"""
-    from agent.feedback_store import get_feedback_store, SIGNAL_IMPRESSION
+    """O11：把当次推荐结果批量记为曝光（impression），rank 即名次，供反馈聚合做位置偏差校正。
 
-    store = get_feedback_store()
-    for i, c in enumerate(ranked, start=1):
-        store.record(
-            user_id, c.id, SIGNAL_IMPRESSION,
-            genres=getattr(c, "genres", None) or None,
-            rank=i, query=query,
-        )
+    P2-3：改单次批量写入（单事务多值 INSERT + 同 query 去重），替代此前每请求
+    N 次独立 record（N=top_k，每行一个独立事务）——曝光是反馈表里量最大的信号，
+    逐条写既拖慢请求又让 user_feedback 线性膨胀。
+    """
+    from agent.feedback_store import get_feedback_store
+
+    if not ranked:
+        return
+    rows = [
+        (c.id, i, getattr(c, "genres", None) or None)
+        for i, c in enumerate(ranked, start=1)
+    ]
+    get_feedback_store().record_impressions(user_id, query, rows)
 
 
 def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[str] = None) -> dict:

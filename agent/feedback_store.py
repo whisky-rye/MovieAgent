@@ -10,10 +10,10 @@ from __future__ import annotations
 import hashlib
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, bindparam, create_engine, text
 
 from config.settings import settings
 
@@ -48,6 +48,20 @@ GENRE_AFFINITY_SCALE = 0.3
 # 显式赞/踩：界面上一件作品只能二选一，存储侧同 item 只保留最新一条（见 record）
 _EXPLICIT_SIGNALS = (SIGNAL_EXPLICIT_LIKE, SIGNAL_EXPLICIT_DISLIKE)
 
+# —— P2-3：聚合成本控制（get_profile 不再每请求全表扫描用户流水）——
+# 隐式信号（click/impression）时间窗：按半衰期折算，窗口外的隐式信号衰减已近零
+# （_IMPLICIT_WINDOW_HALFLIVES 个半衰期 → 残留 <0.4%），不参与聚合；
+# 显式赞/踩是用户意图，**不过窗**（record 已保证同 item 至多一条，量级很小）。
+_IMPLICIT_WINDOW_HALFLIVES = 8
+# 聚合行数硬顶：超限时保留**最新**一批（DESC + LIMIT 后反转回升序交 _aggregate）
+_PROFILE_MAX_ROWS = 5000
+
+
+def _implicit_window_days(half_life_days: int) -> int:
+    """隐式信号聚合窗口（天）；半衰期 ≤0（不衰减）时按 30 天兜底，避免窗口为 0 把信号全滤掉。"""
+    hl = half_life_days if half_life_days and half_life_days > 0 else 30
+    return int(hl * _IMPLICIT_WINDOW_HALFLIVES)
+
 # 存储信号 → 前端语义（GET /feedback/mine 用）
 SIGNAL_TO_FRONT = {
     SIGNAL_EXPLICIT_LIKE: "like",
@@ -75,6 +89,16 @@ class FeedbackStore(ABC):
 
     @abstractmethod
     def clear(self, user_id: str) -> None: ...
+
+    def record_impressions(
+        self, user_id: str, query: str | None,
+        rows: list[tuple[str, int, list[str] | None]],
+    ) -> int:
+        """批量记曝光（P2-3）。默认实现逐条 record；MySQL 子类覆写为单事务批量+去重。"""
+        for item_id, rank, genres in rows:
+            self.record(user_id, item_id, SIGNAL_IMPRESSION,
+                        genres=genres, rank=rank, query=query)
+        return len(rows)
 
 
 class MySQLFeedbackStore(FeedbackStore):
@@ -159,22 +183,90 @@ class MySQLFeedbackStore(FeedbackStore):
                 if locked and lock_name:
                     c.execute(text("SELECT RELEASE_LOCK(:k)"), {"k": lock_name})
 
+    def record_impressions(
+        self, user_id: str, query: str | None,
+        rows: list[tuple[str, int, list[str] | None]],
+    ) -> int:
+        """批量记曝光（P2-3）：单事务多值 INSERT，替代每请求 N 次独立 record。
+
+        rows: [(item_id, rank, genres), ...]
+        - 去重：同 (user, item, query) 的旧曝光先删后插——重复推荐同一 query 只保留
+          最新一批（位置偏差校正用最新名次），避免 user_feedback 以 top_k 行/请求
+          线性膨胀；query 为空的曝光（无上下文）不去重、直接追加。
+        - GET_LOCK(user, query) 串行化，防并发同 query 双写（与显式互斥同款思路）。
+        """
+        if not rows:
+            return 0
+        lock_name = ""
+        if query:
+            lock_name = "fbi:" + hashlib.md5(
+                f"{user_id}:{query}".encode("utf-8")
+            ).hexdigest()
+        with self._engine.begin() as c:
+            if lock_name:
+                got = c.execute(
+                    text("SELECT GET_LOCK(:k, 3)"), {"k": lock_name}
+                ).scalar()
+                if not got:
+                    logger.warning(
+                        "曝光互斥 GET_LOCK 超时，降级 best-effort",
+                        extra={"event": "impression_lock_timeout", "user_id": user_id},
+                    )
+            try:
+                if query:
+                    # 同 query 旧曝光去重（ expanding IN ）
+                    c.execute(
+                        text(
+                            "DELETE FROM user_feedback WHERE `user_id`=:uid AND `signal`=:sig "
+                            "AND `query`=:q AND `item_id` IN :ids"
+                        ).bindparams(bindparam("ids", expanding=True)),
+                        {"uid": user_id, "sig": SIGNAL_IMPRESSION,
+                         "q": query, "ids": [r[0] for r in rows]},
+                    )
+                params = [
+                    {"uid": user_id, "iid": item_id, "kind": "movie",
+                     "sig": SIGNAL_IMPRESSION, "rank": rank, "q": query,
+                     "g": ",".join(genres) if genres else None, "w": 1.0}
+                    for item_id, rank, genres in rows
+                ]
+                # executemany：pymysql 会打成单条多值 INSERT（一次往返）
+                c.execute(
+                    text(
+                        "INSERT INTO user_feedback "
+                        "(`user_id`,`item_id`,`item_kind`,`signal`,`rank`,`query`,`genres`,`weight`) "
+                        "VALUES (:uid,:iid,:kind,:sig,:rank,:q,:g,:w)"
+                    ),
+                    params,
+                )
+            finally:
+                if lock_name:
+                    c.execute(text("SELECT RELEASE_LOCK(:k)"), {"k": lock_name})
+        return len(params)
+
     def get_profile(self, user_id: str, half_life_days: int = 30) -> dict:
         """聚合反馈画像：类型亲和度 / item 黑名单 / item 加分（带时间衰减）。
 
         返回结构（直接喂给 ranker/scorer._feedback_term）：
             {"genre_affinity": {genre: [-1,1]}, "item_boost": {id: +}, "item_blacklist": {id: -}}
+
+        P2-3：隐式信号按时间窗过滤 + 行数硬顶（曝光以 top_k 行/请求线性膨胀，
+        此前每请求全表扫描该用户全部流水，聚合成本随之线性增长）；显式赞踩不过窗。
+        取最新一批（created_at DESC + LIMIT）后反转回升序交 _aggregate（越靠后越新）。
         """
+        since = datetime.now() - timedelta(days=_implicit_window_days(half_life_days))
         with self._engine.connect() as c:
             rows = c.execute(
                 text(
                     "SELECT `signal`, `genres`, `item_id`, `weight`, `created_at` "
-                    "FROM user_feedback WHERE `user_id`=:uid "
-                    "ORDER BY `created_at` ASC, `id` ASC"
+                    "FROM user_feedback WHERE `user_id`=:uid AND ("
+                    "  `signal` IN (:s1,:s2) OR `created_at` >= :since"
+                    ") ORDER BY `created_at` DESC, `id` DESC LIMIT :lim"
                 ),
-                {"uid": user_id},
+                {"uid": user_id, "s1": SIGNAL_EXPLICIT_LIKE,
+                 "s2": SIGNAL_EXPLICIT_DISLIKE, "since": since,
+                 "lim": _PROFILE_MAX_ROWS},
             ).fetchall()
-        return _aggregate(rows, datetime.now(), half_life_days)
+        return _aggregate(list(reversed(rows)), datetime.now(), half_life_days)
 
     def get_explicit_map(self, user_id: str) -> dict:
         """返回 {item_id: "like"|"dislike"}：用户显式操作过的作品及其**当前**状态。
