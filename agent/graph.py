@@ -385,7 +385,10 @@ def _reflect(state: AgentState) -> AgentState:
                                  "fusion_explain": _fmt_fusion_explain(fusion_detail, ranked, n=3)},
                          elapsed_ms=elapsed)
         _append_step(state, step)
-        return {"ranked": ranked, "steps": [step]}
+        # P1-5：兜底成功必须清除 execute 阶段写入的 error——error 是无 reducer 的
+        # 普通键，不清除则 generate 见 error 即返回「检索出了点问题」失败文案，
+        # 把刚刚兜底回来的 ranked 整份丢弃（兜底链路实际不可用）。
+        return {"ranked": ranked, "steps": [step], "error": ""}
     except Exception as e:  # noqa: BLE001 - 兜底失败不阻断，但必须留痕（P1-8）
         # 曾是裸 except return {}：候选不足时冷启动兜底再失败（向量库故障等），
         # 用户拿到「基于 0-4 部候选」的空洞回答，日志却毫无痕迹
@@ -413,7 +416,9 @@ def _generate(state: AgentState) -> AgentState:
         _append_step(state, step)
         return {"answer": f"已记下你的偏好（{genres or '未提取到具体类型'}），下次推荐会优先考虑。",
                 "sources": {}, "steps": [step]}
-    if state.get("error"):
+    # P1-5 双保险：仅当「有错误且没有任何候选」才走失败文案；
+    # reflect 冷启动兜底成功（ranked 非空）后即使 error 残留也正常生成
+    if state.get("error") and not state.get("ranked"):
         elapsed = int((time.time() - t0) * 1000)
         step = _new_step(state, "generate", "generate", "检索失败，返回兜底提示",
                          detail={"error": state["error"]}, elapsed_ms=elapsed)

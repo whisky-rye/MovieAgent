@@ -244,15 +244,18 @@ class Settings(BaseSettings):
     # ---- 二级重排 pipeline（P2/P3 配置化） ----
     # 融合后是否做 MMR 多样性重排（避免清一色同类型）；默认开，等价原 strategy='mmr'
     RERANK_DIVERSIFY: bool = True
-    # 可选 LLM pointwise 精排：对前 N 名做 LIGHT 相关性微调；0=关闭（默认，控成本）
-    RERANK_LLM_TOPN: int = 30
+    # 可选 LLM pointwise 精排：对前 N 名做相关性微调。
+    # 0=关闭（**默认，控成本**——RRF+MMR 已具备基础排序能力；需要更强精排时
+    # 显式设 N>0，并与下方 RERANK_PROVIDER 组合使用）。
+    RERANK_LLM_TOPN: int = 0
     # MMR 多样性强度 λ：0=只看融合分，1=只看多样性；0.3 为常用值
     MMR_LAMBDA: float = 0.3
     # ---- 精排实现开关（新接入点：阿里百炼重排序模型） ----
-    # 阶段二「精排」的实现选择：
-    #   local ：本地 LIGHT 模型 pointwise 精排（旧逻辑，默认，零成本零联网）
-    #   cloud ：阿里百炼 qwen3.7-text-rerank 重排序模型（新接入点，需联网+额度）
-    # 无论哪种，精排都只对前 RERANK_LLM_TOPN 名做（控成本）；RERANK_LLM_TOPN=0 则整段关闭。
+    # 阶段二「精排」的实现选择（仅 RERANK_LLM_TOPN>0 时生效）：
+    #   cloud ：阿里百炼 qwen3.7-text-rerank 重排序模型（当前默认，需联网+额度；
+    #           缺 Key 或调用失败自动回退 local，见 ranker/rerank.py）
+    #   local ：本地 LIGHT 模型 pointwise 精排（旧逻辑，零成本零联网；
+    #           无云端 Key 的环境建议显式设 local，免去每请求构造失败再回退的开销）
     RERANK_PROVIDER: str = "cloud"     # local | cloud
     CLOUD_RERANK_MODEL: str = "qwen3.7-text-rerank"
     # 重排端点与 LLM/嵌入不同路径（百炼走 /api/v1/services/rerank/...）。留空则按 CLOUD_LLM_BASE_URL 推导。
