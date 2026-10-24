@@ -170,6 +170,12 @@ class Settings(BaseSettings):
     # 留空则退回用户鉴权（AUTH_ENABLED=true 时需登录；调试态开放，启动有告警）。
     METRICS_ADMIN_TOKEN: str = ""
     ALERT_WEBHOOK_URL: str = ""          # 告警回调（钉钉/飞书/Slack incoming webhook）；空=仅落日志
+    # —— 告警通知通道：飞书群机器人（P1-11，凭证后补即插即用）——
+    # 自定义群机器人 webhook（群设置 → 群机器人 → 添加机器人 → 自定义机器人）；
+    # 留空=该通道禁用。secret 为机器人「加签」密钥（可选，推荐配，防伪造推送）。
+    ALERT_FEISHU_WEBHOOK: str = ""
+    ALERT_FEISHU_SECRET: str = ""
+    ALERT_NOTIFY_RESOLVED: bool = True   # 告警消退时也推送恢复通知（firing/resolved 生命周期）
     ALERT_EVAL_INTERVAL: int = 60        # 后台告警评估周期（秒）；0=关闭后台循环（仍可在 /admin/stats 手动触发）
     # —— 告警阈值（基于指标快照评估）——
     ALERT_ERROR_RATE: float = 0.05       # 5xx 占总请求比 ≥ 此值 → critical（疑似故障）

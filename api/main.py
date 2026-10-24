@@ -52,7 +52,9 @@ from agent.guardrail import check_guardrail
 from agent.poster import schedule_poster  # G-Poster：对话完成后异步生成 Top3 宣传海报
 from config.settings import settings, validate_auth_config
 from observability.metrics import metrics
-from observability.alerting import run_alert_loop
+from observability.alerting import run_alert_loop, alert_loop_status
+from llm.failover import exhausted_models
+from vector.backend import get_vector_backend
 
 setup_logging()  # 集中式结构化日志（JSON 行 + 滚动文件 + 专用 llm_calls.log）
 _LS_ENABLED = setup_langsmith()  # P4.4：LangSmith 全链路追踪（按开关写入环境变量；缺 Key 自动退化关闭）
@@ -458,15 +460,81 @@ class ChatReq(BaseModel):
 
 @app.get("/health")
 def health():
-    # 暴露当前缓存后端（redis / local），便于运维与 P4.2 兜底观测
-    return {
-        "status": "ok",
+    """深度健康检查（P1-11）：各依赖真实状态 + 告警循环活性 + LLM 熔断摘要。
+
+    status: ok / degraded（非关键降级，如缓存走本地兜底）/ down（关键依赖不可用）。
+    HTTP：down → 503，其余 200（供 Docker healthcheck / 探针直接判状态码）。
+    """
+    checks: dict[str, dict] = {}
+
+    # 1) 业务库 MySQL（会话/偏好/用户/反馈；强模式不可用即 down）
+    try:
+        checks["mysql"] = {
+            "backend": get_session_store().backend(),
+            "healthy": bool(get_memory_store().health()),
+        }
+    except Exception as e:  # noqa: BLE001 - 单项探测失败不影响其它项
+        checks["mysql"] = {"backend": "unknown", "healthy": False, "error": str(e)[:120]}
+
+    # 2) 缓存（Redis 可选：local 兜底算 degraded 不算 down）
+    try:
+        cache = get_cache()
+        be = cache.backend()
+        if be == "redis":
+            checks["cache"] = {"backend": be, "healthy": bool(cache.health())}
+        else:
+            checks["cache"] = {"backend": be, "healthy": True,
+                               "note": "本地兜底（Redis 未配置或不可用）"}
+    except Exception as e:  # noqa: BLE001
+        checks["cache"] = {"backend": "unknown", "healthy": False, "error": str(e)[:120]}
+
+    # 3) 向量库（内容召回依赖；不可用即 down）
+    try:
+        checks["vector"] = {
+            "backend": settings.VECTOR_BACKEND,
+            "healthy": get_vector_backend().count() >= 0,
+        }
+    except Exception as e:  # noqa: BLE001
+        checks["vector"] = {"backend": settings.VECTOR_BACKEND, "healthy": False,
+                            "error": str(e)[:120]}
+
+    # 4) 限流器（Redis 可选，内部自动降级内存，非关键）
+    try:
+        get_limiter()  # 触发懒创建/降级
+        checks["ratelimit"] = {"backend": settings.RATELIMIT_BACKEND, "healthy": True}
+    except Exception as e:  # noqa: BLE001
+        checks["ratelimit"] = {"backend": "unknown", "healthy": False, "error": str(e)[:120]}
+
+    # 5) 告警循环活性（未配置周期=不适用，算健康；僵死算不健康）
+    loop = alert_loop_status()
+    checks["alert_loop"] = {"healthy": (not loop["configured"]) or loop["running"], **loop}
+
+    # 6) LLM 熔断摘要（有模型熔断=degraded：尚有其它模型/本地兜底，不计 down）
+    try:
+        exhausted = exhausted_models()
+    except Exception:  # noqa: BLE001
+        exhausted = []
+    checks["llm_exhausted"] = {"healthy": not exhausted, "models": exhausted}
+
+    critical = ("mysql", "vector", "alert_loop")
+    down = [k for k in critical if not checks[k]["healthy"]]
+    degraded = [k for k, v in checks.items() if not v["healthy"] and k not in down]
+    status = "down" if down else ("degraded" if degraded else "ok")
+    body = {
+        "status": status,
         "service": "movie-agent-api",
         "version": app.version,
-        "cache_backend": get_cache().backend(),
-        "memory_backend": get_memory_store().backend(),
-    "session_backend": get_session_store().backend(),
+        # 扁平摘要字段（向后兼容旧版 /health 消费方）
+        "cache_backend": checks["cache"].get("backend"),
+        "memory_backend": checks["mysql"].get("backend"),
+        "session_backend": checks["mysql"].get("backend"),
+        "checks": checks,
+        "down": down,
+        "degraded": degraded,
     }
+    if status == "down":
+        return JSONResponse(status_code=503, content=body)
+    return body
 
 
 @app.post("/recommend")

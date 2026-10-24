@@ -212,6 +212,11 @@ def is_model_exhausted(model: str) -> bool:
     return model in _EXHAUSTED
 
 
+def exhausted_models() -> list[str]:
+    """当前被熔断的模型列表（供 /health 与看板展示；空=全部可用）。"""
+    return sorted(_EXHAUSTED)
+
+
 def reset_exhausted() -> None:
     """手动清空熔断记录（免费额度被平台重置后调用）。"""
     global _EXHAUSTED

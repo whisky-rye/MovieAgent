@@ -26,9 +26,13 @@ def test_health(client):
     r = client.get("/health")
     assert r.status_code == 200
     body = r.json()
-    assert body["status"] == "ok"
+    assert body["status"] in ("ok", "degraded")  # down 会返 503
     assert body["service"] == "movie-agent-api"
     assert "cache_backend" in body and "session_backend" in body
+    # P1-11：深度健康检查结构（各依赖真实状态 + 告警循环活性 + 熔断摘要）
+    checks = body["checks"]
+    for key in ("mysql", "cache", "vector", "ratelimit", "alert_loop", "llm_exhausted"):
+        assert key in checks and "healthy" in checks[key], f"缺少检查项: {key}"
 
 
 def test_sessions_crud_lifecycle(client):
