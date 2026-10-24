@@ -57,6 +57,8 @@ class CloudRerankClient:
         self.timeout = timeout
         # 端点与 LLM/嵌入不同路径，单独推导（见 _derive_url）
         self._url = base_url or self._derive_url()
+        # P2-2：requests.Session 复用连接池（keep-alive），避免每请求新建 TCP 连接
+        self._session = requests.Session()
         if not self.api_key:
             raise ValueError(
                 "CloudRerankClient 需要 API Key：请在 .env 配置 CLOUD_RERANK_API_KEY "
@@ -116,7 +118,7 @@ class CloudRerankClient:
         if not body["parameters"]:
             del body["parameters"]
 
-        resp = requests.post(
+        resp = self._session.post(
             self._url,
             data=json.dumps(body).encode("utf-8"),
             headers={
@@ -153,6 +155,36 @@ def _cand_dict(c: Candidate) -> dict:
     }
 
 
+_CLIENT: CloudRerankClient | None = None
+_CLIENT_KEY: tuple | None = None
+
+
+def _get_client() -> CloudRerankClient:
+    """云端重排客户端进程级复用（P2-2）：按端点/模型/Key 缓存，配置变更自动重建。
+
+    此前每次 cloud_rerank 都新建客户端（含端点推导 + Key 校验）；客户端内部
+    的 requests.Session 提供连接池 keep-alive，避免每请求新建 TCP 连接。
+    """
+    global _CLIENT, _CLIENT_KEY
+    key = (
+        settings.CLOUD_RERANK_BASE_URL, settings.CLOUD_LLM_BASE_URL,
+        settings.CLOUD_RERANK_MODEL,
+        settings.CLOUD_RERANK_API_KEY or settings.CLOUD_LLM_API_KEY,
+        settings.CLOUD_RERANK_USE_INSTRUCT,
+    )
+    if _CLIENT is None or _CLIENT_KEY != key:
+        _CLIENT = CloudRerankClient()
+        _CLIENT_KEY = key
+    return _CLIENT
+
+
+def _reset_client() -> None:
+    """清空客户端单例（测试/配置热切换用）。"""
+    global _CLIENT, _CLIENT_KEY
+    _CLIENT = None
+    _CLIENT_KEY = None
+
+
 def cloud_rerank(
     cands: list[Candidate], query: str | None, top_k: int | None = None
 ) -> list[Candidate]:
@@ -164,7 +196,7 @@ def cloud_rerank(
     if not query or not cands:
         cands = sorted(cands, key=lambda c: c.score, reverse=True)
         return cands[:top_k] if top_k else cands
-    client = CloudRerankClient()
+    client = _get_client()
     docs = [CloudRerankClient._doc_text(c) for c in cands]
     scored_pairs = client.rerank(query, docs, top_n=len(docs))
     scored: list[Candidate] = []
