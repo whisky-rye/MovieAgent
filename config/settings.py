@@ -246,6 +246,10 @@ class Settings(BaseSettings):
     FUSION_STRATEGY: str = "rrf"
     # RRF 常数 K（名次惩罚项）：越大则高排名优势相对越弱、各路越平等；常用 60
     RRF_K: int = 60
+    # 冷启动质量榜 TTL 缓存（秒，P2-4）：榜单 SQL 的 ORDER BY 为计算表达式无索引，
+    # 全量灌入后每请求全表扫描+filesort 延迟显著；榜单只随语料变化，按查询键缓存，
+    # 每 TTL 至多一次扫描。0=关闭缓存（每请求都查库）。
+    COLDSTART_BOARD_TTL_S: int = 300
     # RRF 来源权重（P3 配置化）：内容相似最高、关系次之、冷启动兜底最低
     # （避免「同剧组」关系召回过强）。格式 key:value 逗号分隔；仅作相对偏置，可省略。
     # graph：知识图谱多跳召回（F1/O12），与 relation 同源但覆盖更广（多跳+类型/地区），权重略低于 relation。
@@ -277,8 +281,7 @@ class Settings(BaseSettings):
 
     # ---- O11 用户反馈调权闭环 ----
     # 是否启用「反馈→排序」回灌（默认开；保留开关便于回退/灰度；环境变量 FEEDBACK_REWEIGHT_ENABLED 可关）
-    FEEDBACK_REWEIGHT_ENABLED: bool = True
-    # 反馈时间衰减半衰期（天）：旧反馈按 0.5^(age/半衰期) 淡出（环境变量 FEEDBACK_HALF_LIFE_DAYS 可改）
+    FEEDBACK_REWEIGHT_ENABLED: bool = True    # 反馈时间衰减半衰期（天）：旧反馈按 0.5^(age/半衰期) 淡出（环境变量 FEEDBACK_HALF_LIFE_DAYS 可改）
     FEEDBACK_HALF_LIFE_DAYS: int = 30
 
     # ---- 推荐海报生成（阿里百炼视觉模型，G-Poster） ----

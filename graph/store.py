@@ -136,13 +136,26 @@ class MysqlGraphFetcher:
         return rels
 
     def _attr_relations(self, key: str, attr: str) -> list[Relation]:
-        """类型/地区 → 影片（反向边，限制数量控成本）。"""
+        """类型/地区 → 影片（反向边，限制数量控成本）。
+
+        P2-4：类型扩展改走维度关联表（{src}_genre_relate + {src}_genre）——
+        - 旧实现对 douban_main/imdb_main 的 `genres LIKE '%name%'` 每类型两表
+          各全表扫描一次，全量灌入后延迟显著；关联表按 (genre_id, 影片id) 建索引，
+          等值 JOIN 成本恒定；
+        - 且消除子串误匹配（LIKE '%动画%' 会把「动画电影」也扩进来）。
+        维度表缺失（开发库未建）或查询失败时自动回退旧 LIKE 路径，图谱不塌。
+        地区维度暂维持 LIKE：dim 名称口径（country_short_name）与 main.country
+        管道串（可能含「中国大陆」等全称）不完全一致，等值匹配会丢边。
+        """
         name = key.split(":", 1)[1]
         pred = "has_genre" if attr == "genre" else "from_country"
         w = REL_WEIGHT[pred]
         rels: list[Relation] = []
         for src in ("douban", "imdb"):
-            col = "genres" if attr == "genre" else "country"
+            if attr == "genre":
+                rels.extend(self._genre_relate_relations(src, key, name, pred, w))
+                continue
+            col = "country"
             idcol = "id" if src == "douban" else "imdb_id"
             rows = self._fetch(
                 f"SELECT {idcol} AS sid, rating, rate_agg FROM {src}_main "
@@ -155,6 +168,42 @@ class MysqlGraphFetcher:
                 if mk:
                     rels.append(Relation(subj=key, pred=pred, obj=mk, weight=w))
         return rels
+
+    def _genre_relate_relations(
+        self, src: str, key: str, name: str, pred: str, w: float
+    ) -> list[Relation]:
+        """类型 → 影片：{src}_genre_relate 等值 JOIN（P2-4），失败回退 LIKE。
+
+        影片 key 直接由 JOIN 出的主键构造，不经 _movie_key_from_subject 的逐行回查
+        （旧路径每行一次 SELECT id FROM douban_main，40 行 = 40 次往返）。
+        """
+        relate, dim = f"{src}_genre_relate", f"{src}_genre"
+        keycol = "douban_id" if src == "douban" else "imdb_id"
+        maincol = "rating" if src == "douban" else "rate_agg"
+        rows = None
+        try:
+            rows = self._fetch(
+                f"SELECT m.id AS pk, m.imdb_id AS iid FROM {relate} g "
+                f"JOIN {dim} d ON d.id = g.genre_id "
+                f"JOIN {src}_main m ON m.{keycol} = g.{keycol} "
+                f"WHERE d.genre_name = :name OR d.genre_cn_name = :name "
+                f"ORDER BY m.{maincol} DESC LIMIT 40",
+                {"name": name},
+            )
+        except Exception as e:  # noqa: BLE001 - 维度表缺失/列不存在 → 回退 LIKE
+            logger.warning("类型维度关联表查询失败，回退 LIKE 路径（%s）：%s", relate, e)
+            rows = self._fetch(
+                f"SELECT id AS pk, imdb_id AS iid FROM {src}_main "
+                f"WHERE genres LIKE :pat ORDER BY {maincol} DESC LIMIT 40",
+                {"pat": f"%{name}%"},
+            )
+        out: list[Relation] = []
+        for r in rows or []:
+            mk = f"douban:{r['pk']}" if src == "douban" else (
+                f"imdb:{r['iid']}" if r.get("iid") else None)
+            if mk:
+                out.append(Relation(subj=key, pred=pred, obj=mk, weight=w))
+        return out
 
     def movie_meta(self, item_ids: list[str]) -> dict:
         """批量取影片元数据，按 item_id 返回。"""
