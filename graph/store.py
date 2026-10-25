@@ -11,7 +11,10 @@
   生成人类可读的关系链解释（如「《星际穿越》→ 导演 诺兰 → 《盗梦空间》」）。
 """
 import logging
+from collections import OrderedDict
 from typing import Optional
+
+from config.settings import settings
 
 from graph.schema import (
     REL_LABEL_CN,
@@ -286,10 +289,13 @@ class MysqlGraphFetcher:
 class KnowledgeGraphStore:
     """邻接缓存 + 多跳 BFS 遍历。生产可换 Neo4j（接口不变）。"""
 
-    def __init__(self, fetcher, cache_max: int = 20000):
+    def __init__(self, fetcher, cache_max: int | None = None):
         self._f = fetcher
-        self._cache: dict[str, list[Relation]] = {}
-        self._cache_max = cache_max
+        # OrderedDict：按入库序做真正的 FIFO 淘汰（P2-14）
+        self._cache: "OrderedDict[str, list[Relation]]" = OrderedDict()
+        # P2-14：容量上限消费 settings.GRAPH_CACHE_MAX——此前硬编码 20000，
+        # settings 里的配置项形同虚设（调缓存上限只能改代码）；显式传入优先
+        self._cache_max = cache_max if cache_max is not None else settings.GRAPH_CACHE_MAX
 
     def search_person(self, name: str, limit: int = 5) -> list[str]:
         """按人名检索人物 key（实体中心召回入口）。"""
@@ -342,11 +348,17 @@ class KnowledgeGraphStore:
         return hits[:top_k]
 
     def _neighbors(self, key: str) -> list[Relation]:
-        if key in self._cache:
-            return self._cache[key]
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
         rels = self._f.relations_from(key) or []
+        if self._cache_max <= 0:
+            return rels  # 容量 0 = 不缓存（直通）
         if len(self._cache) >= self._cache_max:
-            self._cache.clear()  # 简单 FIFO 淘汰，避免无界增长
+            # P2-14：真正的 FIFO 淘汰——逐出最早入库的一项。此前是整体 clear：
+            # 达上限后缓存全部失效，引发一轮打库抖动，且 docstring 声称的
+            # 「FIFO 淘汰」名不副实。
+            self._cache.popitem(last=False)
         self._cache[key] = rels
         return rels
 
@@ -470,8 +482,12 @@ class KnowledgeGraphStore:
 _store_singleton = None
 
 
-def get_graph_store(cache_max: int = 20000):
-    """进程内单例：默认 MySQL fetcher，邻接缓存跨请求复用。"""
+def get_graph_store(cache_max: int | None = None):
+    """进程内单例：默认 MySQL fetcher，邻接缓存跨请求复用。
+
+    cache_max 省略时取 settings.GRAPH_CACHE_MAX（P2-14：此前硬编码 20000，
+    配置项定义不消费）；显式传入优先（测试/特殊部署用）。
+    """
     global _store_singleton
     if _store_singleton is None:
         _store_singleton = KnowledgeGraphStore(MysqlGraphFetcher(), cache_max=cache_max)
