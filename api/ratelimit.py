@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 from config.settings import settings
@@ -58,8 +59,7 @@ class TokenBucket:
                 self.tokens -= tokens
                 return True, 0.0
             deficit = tokens - self.tokens
-            wait = deficit / self.rate if self.rate > 0 else float("inf")
-            return False, wait
+            return False, _wait_seconds(deficit, self.rate)
 
 
 class RedisTokenBucket:
@@ -106,8 +106,7 @@ class RedisTokenBucket:
         if allowed:
             return True, 0.0
         deficit = tokens - float(remaining)
-        wait = deficit / self.rate if self.rate > 0 else float("inf")
-        return False, wait
+        return False, _wait_seconds(deficit, self.rate)
 
 
 def _build_redis_client() -> Optional[object]:
@@ -129,6 +128,24 @@ def _build_redis_client() -> Optional[object]:
         return None
 
 
+# 内存令牌桶的 key 数硬顶（P2-16）：调试模式按 IP 限流后，恶意/扫描流量会造出
+# 大量一次性 key；无淘汰时 _memory 无界增长（慢速内存泄漏），达顶后按 LRU 逐出
+# 最久未用的桶（被逐出的 key 下次请求自然重建，语义无损）。
+_MEMORY_MAX_KEYS = 10000
+
+# 等待秒数上限（P2-16）：rate=0（不补充令牌）时 deficit/rate 为 inf，直接进
+# Retry-After 头/提示文案会把 int(inf) 算崩（OverflowError 把 429 变 500）。
+# 封顶为 1 小时——对客户端只是「稍后重试」的参考值，语义无损。
+_MAX_WAIT_S = 3600.0
+
+
+def _wait_seconds(deficit: float, rate: float) -> float:
+    """桶排空所需的等待秒数（rate<=0 时封顶，绝不返回 inf）。"""
+    if rate <= 0:
+        return _MAX_WAIT_S
+    return min(deficit / rate, _MAX_WAIT_S)
+
+
 class RateLimiter:
     """多 key 令牌桶管理器（懒创建，单例）。
 
@@ -139,7 +156,7 @@ class RateLimiter:
     def __init__(self):
         self.rate = float(settings.RATELIMIT_RATE)
         self.burst = float(settings.RATELIMIT_BURST)
-        self._memory: Dict[str, TokenBucket] = {}
+        self._memory: "OrderedDict[str, TokenBucket]" = OrderedDict()
         self._lock = threading.Lock()
         self._redis: Optional[RedisTokenBucket] = None
         self._redis_tried = False
@@ -169,7 +186,12 @@ class RateLimiter:
             # 内存回退（含 Redis 初始化失败的情形）
             with self._lock:
                 bucket = self._memory.get(key)
-                if bucket is None:
+                if bucket is not None:
+                    self._memory.move_to_end(key)  # LRU：命中即刷新时序
+                else:
+                    if len(self._memory) >= _MEMORY_MAX_KEYS:
+                        # 逐出最久未用的一项（被逐出的 key 下次请求自然重建）
+                        self._memory.popitem(last=False)
                     bucket = TokenBucket(self.rate, self.burst)
                     self._memory[key] = bucket
             ok, wait = bucket.consume(tokens)

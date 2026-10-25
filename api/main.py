@@ -358,6 +358,20 @@ def _build_history(session_id: Optional[str]) -> str:
         return ""
 
 
+def _rate_limit_key(request: Request, user_id: str) -> str:
+    """限流键（P2-16）：鉴权模式用 user_id（token 派生，不可伪造）；
+    调试模式（AUTH_ENABLED=false）用客户端 IP。
+
+    背景：调试模式下 user_id 来自 query/body（deps 的兼容兜底），攻击者轮换
+    user_id 即可为每次请求开一个全新令牌桶——按它限流等于没限。IP 无法在请求
+    内伪造（TCP 层属性），是调试模式唯一可用的稳定身份。
+    """
+    if settings.AUTH_ENABLED:
+        return f"user:{user_id}"
+    ip = request.client.host if request.client else "unknown"
+    return f"ip:{ip}"
+
+
 def _log_impressions(user_id: str, query: str, ranked: list) -> None:
     """O11：把当次推荐结果批量记为曝光（impression），rank 即名次，供反馈聚合做位置偏差校正。
 
@@ -377,7 +391,7 @@ def _log_impressions(user_id: str, query: str, ranked: list) -> None:
 
 
 def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[str] = None,
-         top_k: int | None = None) -> dict:
+         top_k: int | None = None, rl_key: str | None = None) -> dict:
     """同步跑 Agent，返回完整 state（answer + ranked 候选）。
 
     护栏（P5 补充）：在锁之前先做内容安全判定——命中敏感/越域直接返回，
@@ -385,6 +399,8 @@ def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[st
 
     top_k（P2-11）：最终返回条数，下传进 agent state 由 _execute 消费；
     省略=20（历史行为，/chat 等无 top_k 概念的入口）。
+    rl_key（P2-16）：限流键，由调用方按 _rate_limit_key 生成（鉴权=user_id/
+    调试=IP）；省略时退回 user_id（兼容既有内部调用与测试）。
     """
     if not request_id:
         request_id = uuid.uuid4().hex[:12]
@@ -414,8 +430,10 @@ def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[st
 
     # 限流（P5 补充）：仅护栏放行、且非缓存命中的真实 LLM 调用才消耗令牌。
     # 放在锁之前——否则排队中的请求都占锁等待，限流失去意义。
+    # P2-16：键由调用方生成（鉴权=user_id 不可伪造；调试=IP，body 里的 user_id
+    # 可任意轮换，按它限流等于没限）；省略时退回 user_id 保持旧行为。
     if settings.RATELIMIT_ENABLED:
-        ok, retry_after = get_limiter().consume(user_id)
+        ok, retry_after = get_limiter().consume(rl_key or f"user:{user_id}")
         if not ok:
             logger_api.warning(
                 "rate_limited 限流触发",
@@ -649,8 +667,10 @@ def recommend(
     try:
         # P2-11：req.top_k（1~50）下传 agent——此前 rerank 硬编码 20，
         # top_k>20 被静默截断（接口收 50 实际最多返 20）
+        # P2-16：限流键按模式生成（调试模式轮换 user_id 绕不过令牌桶）
         state = _run(req.query, auth.user_id, request_id=request_id,
-                     session_id=req.session_id, top_k=req.top_k)
+                     session_id=req.session_id, top_k=req.top_k,
+                     rl_key=_rate_limit_key(request, auth.user_id))
     except RateLimited as e:  # 限流触发：标准 429 + Retry-After（埋点已在限流器内统一计数）
         raise HTTPException(
             status_code=429,
@@ -699,8 +719,10 @@ async def chat(
     async def gen():
         try:
             # P1-3：透传 session_id —— _run 据此加载历史上下文（多轮连贯）
+            # P2-16：限流键按模式生成（同 /recommend）
             state = await asyncio.to_thread(
-                _run, req.query, auth.user_id, request_id, req.session_id
+                _run, req.query, auth.user_id, request_id, req.session_id,
+                None, _rate_limit_key(request, auth.user_id),
             )
         except RateLimited as e:  # 流式接口无法回 429 状态码，推提示文本
             yield f"请求过于频繁，请 {max(1, int(e.retry_after))} 秒后再试。\n"
@@ -806,9 +828,13 @@ async def recommend_stream(
                                  "message": g.message})
         return StreamingResponse(_block(), media_type="text/event-stream")
 
+    # P2-15 收尾：stream 不经 _run，此处补齐 sanitized_query——放行后喂给 agent
+    # 的必须是净化/截断后的 query（否则该路径的长度兜底依然缺失）。
+    req_query = g.sanitized_query or req.query
     # 限流（锁前、仅真实 LLM 才扣令牌）
+    # P2-16：键按模式生成（鉴权=user_id；调试=IP，轮换 body user_id 绕不过）
     if settings.RATELIMIT_ENABLED:
-        ok, retry_after = get_limiter().consume(auth.user_id)
+        ok, retry_after = get_limiter().consume(_rate_limit_key(request, auth.user_id))
         if not ok:
             logger_api.warning("rate_limited 限流触发（stream）",
                                extra={"event": "rate_limited", "user_id": auth.user_id,
@@ -822,7 +848,7 @@ async def recommend_stream(
     ev_q: "queue.Queue" = queue.Queue()
     init_state = {
         "user_id": auth.user_id,
-        "query": req.query,
+        "query": req_query,  # P2-15：净化/截断后的 query
         "request_id": request_id,
         "history": _build_history(req.session_id),
         "top_k": req.top_k,  # P2-11：与 /recommend 一致下传（省略=20）
