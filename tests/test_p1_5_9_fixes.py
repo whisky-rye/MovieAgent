@@ -66,7 +66,7 @@ def test_rerank_calls_provider_when_topn_positive(monkeypatch):
     monkeypatch.setattr(settings, "RERANK_PROVIDER", "local")
     called = []
 
-    def _fake_llm(head, query, top_k):
+    def _fake_llm(head, query, top_k=None, positions=None):  # P2-7 起带 positions
         called.append(len(head))
         return head
 

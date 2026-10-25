@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from retrieval.candidates import Candidate, sort_by_score
 from llm.factory import get_light
+from ranker.scorer import _with_position_prior
 
 _PROMPT = (
     "你是电影推荐的相关性评判。给用户查询与候选影片信息，"
@@ -67,10 +68,14 @@ def llm_rerank(
     cands: list[Candidate],
     query: str | None,
     top_k: int | None = None,
+    positions: dict | None = None,
 ) -> list[Candidate]:
     """用本地 LIGHT 模型对每条候选打 0-1 相关性分，与融合分加权(0.7/0.3)后重排。
 
     P2-2：打分并发执行（见模块头）；结果按候选原位映射，排序语义不变。
+    P2-7：positions（{id: MMR 名次}）作为位置先验叠加进融合分——精排是相关性
+    「微调」而非重排：相关性差距大于先验差时仍按相关性排序，接近持平时保持
+    MMR 已取得的多样性次序（见 ranker.scorer._with_position_prior）。
     """
     if not query:
         cands = sort_by_score(cands)
@@ -83,7 +88,9 @@ def llm_rerank(
     else:
         scores = [_score_one(llm, query, c) for c in cands]
     scored = [
-        Candidate(**{**_cand_dict(c), "score": 0.7 * c.score + 0.3 * s})
+        Candidate(**{**_cand_dict(c),
+                     "score": _with_position_prior(0.7 * c.score + 0.3 * s,
+                                                   c.id, positions)})
         for c, s in zip(cands, scores)
     ]
     scored = sort_by_score(scored)

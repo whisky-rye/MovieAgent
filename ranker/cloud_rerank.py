@@ -19,6 +19,7 @@ import logging
 
 import requests
 from config.settings import settings
+from ranker.scorer import _with_position_prior
 from retrieval.candidates import Candidate, sort_by_score
 
 logger = logging.getLogger("movie_agent.ranker.cloud_rerank")
@@ -186,12 +187,15 @@ def _reset_client() -> None:
 
 
 def cloud_rerank(
-    cands: list[Candidate], query: str | None, top_k: int | None = None
+    cands: list[Candidate], query: str | None, top_k: int | None = None,
+    positions: dict | None = None,
 ) -> list[Candidate]:
     """用阿里百炼 qwen3.7-text-rerank 对候选重排，与本地 LIGHT 精排同权重融合。
 
     融合逻辑保持与 ranker.llm_rerank.llm_rerank 一致（0.7*融合分 + 0.3*相关性分），
     这样切换 provider 时排序风格稳定、可对比。
+    P2-7：positions（{id: MMR 名次}）作为位置先验叠加进融合分——精排是相关性
+    「微调」而非重排，保住 MMR 取得的多样性（见 ranker.scorer._with_position_prior）。
     """
     if not query or not cands:
         cands = sort_by_score(cands)
@@ -205,6 +209,7 @@ def cloud_rerank(
             continue
         c = cands[idx]
         fused = _FUSION_W * c.score + _RERANK_W * rel
-        scored.append(Candidate(**{**_cand_dict(c), "score": fused}))
+        scored.append(Candidate(**{**_cand_dict(c),
+                                   "score": _with_position_prior(fused, c.id, positions)}))
     scored = sort_by_score(scored)
     return scored[:top_k] if top_k else scored

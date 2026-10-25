@@ -152,36 +152,103 @@ def _genre_overlap(a: Candidate, b: Candidate) -> float:
     return inter / uni if uni else 0.0
 
 
+# 多样性代理各维度权重：类型仍是主信号（原逻辑），年代/地区补足「同类型不同
+# 代/不同产地」的多样性约束（P2-7）
+_DIV_WEIGHTS = {"genre": 0.6, "year": 0.2, "country": 0.2}
+
+
+def _div_features(c: Candidate) -> tuple:
+    """候选的多样性特征（MMR 预计算用）：(类型集, 年份, 地区集)。"""
+    cs = frozenset(
+        x.strip() for x in (c.country or "").replace("|", "/").split("/") if x.strip()
+    )
+    return (frozenset(c.genres or ()), c.year or 0, cs)
+
+
+def _sim_features(fa: tuple, fb: tuple) -> float:
+    """特征级相似度（_diversity_distance 的预计算版，单一事实源）。"""
+    ga, ya, ca = fa
+    gb, yb, cb = fb
+    s = 0.0
+    if ga and gb:
+        uni = len(ga | gb)
+        s += _DIV_WEIGHTS["genre"] * (len(ga & gb) / uni if uni else 0.0)
+    if ya and yb:
+        s += _DIV_WEIGHTS["year"] * max(0.0, 1.0 - abs(ya - yb) / 30.0)
+    if ca and cb and (ca & cb):
+        s += _DIV_WEIGHTS["country"]
+    return s
+
+
+def _diversity_distance(a: Candidate, b: Candidate) -> float:
+    """候选间相似度代理（MMR 的 sim 项）：类型/年代/地区三维归一加权。
+
+    P2-7：原代理只有类型 Jaccard——年代/地区/卡司多样性无约束，结果可能是
+    「同类型但同十年同产地」的一批片。缺信息维度不惩罚（返回 0，不假设不同），
+    避免元数据稀疏的源被无谓推远。
+    """
+    return _sim_features(_div_features(a), _div_features(b))
+
+
+# 位置先验（P2-7）：MMR 已把多样性/均衡性编码进名次，精排若纯按相关性重排会把
+# 多样性成果抹掉。给按其名次加一个随名次指数衰减的小先验（第 1 名 1.0、最后
+# 一名 0.5），使精排是「微调」而非「重排」：相关性差距大于先验差时仍按相关性，
+# 接近持平时保持 MMR 次序。权重很小（_POSITION_PRIOR_W），只做并列保护。
+_POSITION_PRIOR_W = 0.1
+
+
+def _position_prior(pos: int, total: int) -> float:
+    """MMR 名次先验：pos 为 1-based 名次，total 为总候选数；total<=1 恒 1.0。"""
+    if total <= 1 or pos <= 1:
+        return 1.0
+    if pos >= total:
+        return 0.5
+    return 0.5 ** ((pos - 1) / (total - 1))
+
+
+def _with_position_prior(base: float, cand_id: str, positions: dict | None) -> float:
+    """给精排融合分叠加 MMR 位置先验（P2-7）。
+
+    positions 为 {候选 id: 1-based MMR 名次}（rerank 在 MMR 之后构建）；缺失/
+    空表示无上游次序信息（如未开 MMR），原样返回。先验差（首末名 0.05~0.1）
+    远小于有实际意义的相关性差，只保护「相关性接近时保持 MMR 次序」。
+    """
+    if not positions:
+        return base
+    pos = positions.get(cand_id)
+    if not pos:
+        return base
+    return base + _POSITION_PRIOR_W * _position_prior(pos, len(positions))
+
+
 def mmr_diversify(
     cands: list[Candidate],
     lambda_div: float = 0.3,
     top_k: int | None = None,
 ) -> list[Candidate]:
-    """以类型重叠作为距离代理的 MMR 重排，提升结果多样性（避免清一色同类型）。
+    """MMR 多样性重排：相关性为主、相似度惩罚为辅，避免清一色同类型。
 
-    P2-5：预计算候选类型集合（frozenset）+ 「已选标记」单遍扫描，替代旧实现的
-    `remain.remove(best)`（每轮 O(n) 删除）与每轮重复 set 构造；选择语义逐位
-    保持一致（mmr 严格大于才换、并列取输入序在前者），因此重排结果与旧实现
-    完全一致（可对比验证），只是去掉常数级浪费、避免 top_k 放大时的平方删除。
+    实现要点：
+    - P2-5：特征预计算 + 「已选标记」单遍扫描，替代 `remain.remove(best)`
+      的每轮 O(n) 删除；选择语义严格保持（mmr 严格大于才换、并列取输入序
+      在前者）；
+    - P2-7：相似度代理从「仅类型 Jaccard」升级为类型/年代/地区三维加权
+      （_diversity_distance）——年代/地区多样性从此有约束。
     """
     if not cands:
         return []
-    gsets = [frozenset(c.genres or ()) for c in cands]
+    feats = [_div_features(c) for c in cands]
     n = len(cands)
     limit = n if top_k is None else min(top_k, n)
     chosen = [False] * n
     selected: list[Candidate] = []
-    sel_sets: list[frozenset] = []   # 仅收非空类型集（空集重叠恒 0，无需参与比较）
+    sel_feats: list[tuple] = []   # 已选特征（含全零特征：对 max 贡献 0，无害）
     while len(selected) < limit:
         best_idx, best_score = -1, -1e9
         for i in range(n):
             if chosen[i]:
                 continue
-            gi = gsets[i]
-            sim = 0.0
-            if gi and sel_sets:
-                # 与已选集合的最大 Jaccard 重叠（与 _genre_overlap 同式）
-                sim = max(len(gi & s) / len(gi | s) for s in sel_sets)
+            sim = max((_sim_features(feats[i], f) for f in sel_feats), default=0.0)
             mmr = (1 - lambda_div) * cands[i].score - lambda_div * sim
             if mmr > best_score:
                 best_idx, best_score = i, mmr
@@ -189,6 +256,5 @@ def mmr_diversify(
             break
         chosen[best_idx] = True
         selected.append(cands[best_idx])
-        if gsets[best_idx]:
-            sel_sets.append(gsets[best_idx])
+        sel_feats.append(feats[best_idx])
     return selected

@@ -98,6 +98,11 @@ def rerank(
     # 阶段一：MMR 多样性重排（避免清一色同类型）
     if diversify:
         cands = mmr_diversify(cands, lambda_div=lambda_div, top_k=top_k)
+        # P2-7：记录 MMR 名次交精排作位置先验——精排若纯按相关性重排会把 MMR
+        # 取得的多样性抹掉；先验只做「微调不重排」（见 scorer._with_position_prior）
+        positions = {c.id: i for i, c in enumerate(cands, start=1)}
+    else:
+        positions = None
 
     # 阶段二：可选精排（仅对前 llm_topn 做，控成本）
     #   RERANK_PROVIDER=cloud → 阿里百炼 qwen3.7-text-rerank 重排序模型（新接入点）
@@ -110,14 +115,17 @@ def rerank(
             provider = rerank_provider or settings.RERANK_PROVIDER
             if provider == "cloud":
                 try:
-                    cands = cloud_rerank(head, query, top_k=llm_topn) + tail
+                    cands = cloud_rerank(head, query, top_k=llm_topn,
+                                         positions=positions) + tail
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
                         "云端重排序(cloud)失败，回退本地 LIGHT 旧逻辑: %s", e
                     )
-                    cands = llm_rerank(head, query, top_k=llm_topn) + tail
+                    cands = llm_rerank(head, query, top_k=llm_topn,
+                                       positions=positions) + tail
             else:
-                cands = llm_rerank(head, query, top_k=llm_topn) + tail
+                cands = llm_rerank(head, query, top_k=llm_topn,
+                                   positions=positions) + tail
         else:
             # 无 query 时精排退化为按融合分排序（与 llm_rerank 内部一致）
             cands = sort_by_score(cands)

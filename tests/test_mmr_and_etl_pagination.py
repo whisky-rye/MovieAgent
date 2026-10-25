@@ -28,7 +28,27 @@ from retrieval.candidates import Candidate
 # ---------- MMR：语义等价 + 边界 ----------
 
 def _ref_mmr(cands, lambda_div=0.3, top_k=None):
-    """旧实现的参考副本（用于逐位对比，验证优化不改变语义）。"""
+    """旧实现结构的参考副本（P2-5 起用于逐位对比）。
+
+    P2-7 起相似度代理升级为类型/年代/地区三维加权（scorer._diversity_distance），
+    本参考副本**独立实现同一公式**（不调用 scorer 的内部函数），从而继续验证
+    「选择循环」本身与直白参考实现一致——距离公式的正确性由
+    test_diversity_and_position_prior.py 的专项用例覆盖。
+    """
+    def _sim(a, b):
+        ga, gb = set(a.genres or ()), set(b.genres or ())
+        s = 0.0
+        if ga and gb:
+            uni = len(ga | gb)
+            s += 0.6 * (len(ga & gb) / uni if uni else 0.0)
+        if a.year and b.year:
+            s += 0.2 * max(0.0, 1.0 - abs(a.year - b.year) / 30.0)
+        ca = {x.strip() for x in (a.country or "").replace("|", "/").split("/") if x.strip()}
+        cb = {x.strip() for x in (b.country or "").replace("|", "/").split("/") if x.strip()}
+        if ca and cb and (ca & cb):
+            s += 0.2
+        return s
+
     if not cands:
         return []
     selected: list[Candidate] = []
@@ -36,17 +56,7 @@ def _ref_mmr(cands, lambda_div=0.3, top_k=None):
     while remain and (top_k is None or len(selected) < top_k):
         best, best_score = None, -1e9
         for c in remain:
-            sim = 0.0
-            if c.genres:
-                sims = []
-                for s in selected:
-                    if not s.genres:
-                        sims.append(0.0)
-                        continue
-                    inter = len(set(c.genres) & set(s.genres))
-                    uni = len(set(c.genres) | set(s.genres))
-                    sims.append(inter / uni if uni else 0.0)
-                sim = max(sims) if sims else 0.0
+            sim = max((_sim(c, s) for s in selected), default=0.0)
             mmr = (1 - lambda_div) * c.score - lambda_div * sim
             if mmr > best_score:
                 best, best_score = c, mmr
