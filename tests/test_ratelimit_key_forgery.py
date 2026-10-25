@@ -68,7 +68,14 @@ def test_rl_key_debug_mode_no_client():
 
 # ---------- 内存桶 LRU ----------
 
-def _limiter():
+def _limiter(monkeypatch=None):
+    """直连内存分支的 limiter。
+
+    显式置 RATELIMIT_ENABLED=True：consume() 首行检查该开关，历史上 e2e conftest
+    的普通赋值会把它泄漏成 False，使直连用例被「限流已关」短路（现已修 conftest，
+    这里仍显式声明，自包含不依赖外部状态）。
+    """
+    settings.RATELIMIT_ENABLED = True
     old_backend = settings.RATELIMIT_BACKEND
     settings.RATELIMIT_BACKEND = "memory"  # 直走内存分支（Redis 不可用也不影响）
     try:
@@ -79,7 +86,7 @@ def _limiter():
 
 def test_memory_lru_evicts_least_recently_used(monkeypatch):
     monkeypatch.setattr(rl_mod, "_MEMORY_MAX_KEYS", 3)
-    lim = _limiter()
+    lim = _limiter(monkeypatch)
     for k in ("a", "b", "c"):
         lim.consume(k)
     assert list(lim._memory.keys()) == ["a", "b", "c"]
@@ -92,7 +99,7 @@ def test_memory_lru_evicts_least_recently_used(monkeypatch):
 def test_memory_evicted_key_recreated(monkeypatch):
     """被逐出的 key 再次请求自然重建（语义无损，只是重新计流）。"""
     monkeypatch.setattr(rl_mod, "_MEMORY_MAX_KEYS", 2)
-    lim = _limiter()
+    lim = _limiter(monkeypatch)
     lim.consume("a")
     lim.consume("b")
     lim.consume("c")          # 逐出 a
@@ -111,7 +118,7 @@ def test_memory_bucket_still_rate_limits(monkeypatch):
     monkeypatch.setattr(rl_mod, "_MEMORY_MAX_KEYS", 10)
     monkeypatch.setattr(settings, "RATELIMIT_RATE", 0.0)   # 不补充
     monkeypatch.setattr(settings, "RATELIMIT_BURST", 1)
-    lim = _limiter()
+    lim = _limiter(monkeypatch)
     assert lim.consume("k")[0] is True
     assert lim.consume("k")[0] is False   # burst=1 → 第二次被限
 

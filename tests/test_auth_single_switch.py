@@ -118,11 +118,21 @@ def test_debug_mode_valid_token_trusted_when_secret_set(monkeypatch):
 # ---------- Cookie Secure 派生 ----------
 
 @_api_skip
-def test_cookie_secure_follows_auth_switch(monkeypatch):
+def test_cookie_secure_follows_app_env(monkeypatch):
+    """P2-18 新契约：Secure 跟随 APP_ENV（非 local 即 True），不再跟随 AUTH_ENABLED。
+
+    旧契约（Secure 跟随 AUTH_ENABLED）会让调试态 token 明文传输，已废弃。
+    """
     monkeypatch.setattr(cs.settings, "COOKIE_SECURE", None)
-    monkeypatch.setattr(cs.settings, "AUTH_ENABLED", True)
-    assert auth_routes_mod._cookie_secure() is True
+    monkeypatch.setattr(cs.settings, "APP_ENV", "local")
+    assert auth_routes_mod._cookie_secure() is False   # 本地开发可 HTTP 联调
+    monkeypatch.setattr(cs.settings, "APP_ENV", "production")
+    assert auth_routes_mod._cookie_secure() is True    # 非 local 一律 Secure
+    # AUTH_ENABLED 不再影响 Secure（新旧契约的分界）
     monkeypatch.setattr(cs.settings, "AUTH_ENABLED", False)
+    assert auth_routes_mod._cookie_secure() is True
+    monkeypatch.setattr(cs.settings, "AUTH_ENABLED", True)
+    monkeypatch.setattr(cs.settings, "APP_ENV", "local")
     assert auth_routes_mod._cookie_secure() is False
 
 

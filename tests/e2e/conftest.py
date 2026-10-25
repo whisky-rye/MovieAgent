@@ -91,6 +91,11 @@ class _FakeSemCache:
 @pytest.fixture(scope="module")
 def client():
     # 调试态放行：避免 e2e 强依赖登录 token（recommend/sessions 走 user_id 回退）
+    # 注意：以下三项是**普通赋值**，会泄漏到本进程后续所有测试模块（pytest 按
+    # 目录名字母序收集，e2e/ 先于 test_*.py）——历史上因此把
+    # test_history_compress 的限流用例打成「必失败」。故在 teardown 显式恢复。
+    _saved = (settings.AUTH_ENABLED, settings.RATELIMIT_ENABLED,
+              settings.SEMANTIC_CACHE_ENABLED)
     settings.AUTH_ENABLED = False
     settings.RATELIMIT_ENABLED = False
     settings.SEMANTIC_CACHE_ENABLED = False
@@ -116,3 +121,6 @@ def client():
 
     with TestClient(m.app) as c:
         yield c
+
+    # 恢复被本 fixture 改过的全局 settings（防跨模块泄漏）
+    settings.AUTH_ENABLED, settings.RATELIMIT_ENABLED, settings.SEMANTIC_CACHE_ENABLED = _saved
