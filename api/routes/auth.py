@@ -4,7 +4,9 @@
 - 登录：校验密码 → 签发 token → 同时下发两类 Cookie：
     · ma_token（HttpOnly）：JWT，JS 无法读取，防 XSS 窃取；用于后端验签。
     · ma_csrf（可读）：随机值，前端读取后放入 X-CSRF-Token 头做双提交校验，防 CSRF。
-- /auth/logout：清除两类 Cookie（前端调它即可退出，无需再管 localStorage）。
+- /auth/logout：清除两类 Cookie + **服务端吊销当前 token 的 jti**（P2-17）——
+  此前只清 Cookie，已签发 token 在 7 天 TTL 内仍然有效，泄密 token 无法作废。
+- 登录/注册按 IP+用户名限流（P2-17）：防暴力爆破与用户名枚举。
 - /auth/me：回显当前登录用户（受保护）。
 - 零新依赖：密码/ token 全部用 stdlib（见 agent/auth_crypto.py）。
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import threading
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -19,10 +22,55 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
 from agent.auth_crypto import hash_password, issue_token, verify_token
+from agent.token_blacklist import revoke
 from agent.user_store import get_user_store
+from api.ratelimit import RateLimiter
 from config.settings import settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# 登录/注册独立限流器（P2-17）：与 LLM 入口的限流器隔离——按「错误尝试」场景
+# 设定容量/速率（突发 10 次，之后约每 6 秒 1 次）。正常用户输错几次密码不会被
+# 误伤；脚本爆破/用户名枚举在十余次后必须等待。懒创建 + 锁（双检）。
+_AUTH_RL_RATE = 1.0 / 6.0   # 每秒 1/6 个令牌 ≈ 每 6 秒 1 次
+_AUTH_RL_BURST = 10.0       # 连续突发上限
+_auth_limiter: RateLimiter | None = None
+_auth_limiter_lock = threading.Lock()
+
+
+def _auth_rate_limit(request: Request, username: str) -> None:
+    """按 IP+用户名消耗 1 令牌；超限抛 429（带 Retry-After）。RATELIMIT_ENABLED=false 时跳过。"""
+    global _auth_limiter
+    if not settings.RATELIMIT_ENABLED:
+        return
+    with _auth_limiter_lock:
+        if _auth_limiter is None:
+            _auth_limiter = RateLimiter(rate=_AUTH_RL_RATE, burst=_AUTH_RL_BURST)
+    ip = request.client.host if request.client else "unknown"
+    ok, retry_after = _auth_limiter.consume(f"auth:{ip}:{(username or '').lower()}")
+    if not ok:
+        raise HTTPException(
+            status_code=429,
+            detail="尝试过于频繁，请稍后再试",
+            headers={"Retry-After": str(max(1, int(retry_after)))},
+        )
+
+
+def _current_token(request: Request) -> str | None:
+    """从请求取当前 token（Bearer 优先，Cookie 兜底）——与 /auth/me 同口径。"""
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else None
+    return token or request.cookies.get(settings.AUTH_COOKIE_NAME)
+
+
+def _revoke_current_token(request: Request) -> None:
+    """吊销当前 token 的 jti（P2-17）：TTL 取剩余寿命，过期后黑名单项自然消失。"""
+    payload = verify_token(_current_token(request) or "")
+    if not payload:
+        return  # 无有效 token（如 Cookie 已清/未登录）→ 无需吊销
+    import time as _time
+    ttl = float(payload.get("exp", 0)) - _time.time()
+    revoke(str(payload.get("jti") or ""), ttl)
 
 
 class RegisterReq(BaseModel):
@@ -83,7 +131,9 @@ def _clear_auth_cookies(resp: Response) -> None:
 
 
 @router.post("/register")
-def register(req: RegisterReq, response: Response):
+def register(req: RegisterReq, request: Request, response: Response):
+    # P2-17：按 IP+用户名限流，防批量注册/用户名枚举
+    _auth_rate_limit(request, req.username)
     store = get_user_store()
     if store.get_by_username(req.username) is not None:
         raise HTTPException(status_code=409, detail="用户名已存在")
@@ -104,7 +154,9 @@ def register(req: RegisterReq, response: Response):
 
 
 @router.post("/login")
-def login(req: LoginReq, response: Response):
+def login(req: LoginReq, request: Request, response: Response):
+    # P2-17：按 IP+用户名限流，防暴力爆破（失败也计次——在查询前消耗）
+    _auth_rate_limit(request, req.username)
     store = get_user_store()
     if store.get_by_username(req.username) is None:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
@@ -117,7 +169,10 @@ def login(req: LoginReq, response: Response):
 
 
 @router.post("/logout")
-def logout(response: Response):
+def logout(request: Request, response: Response):
+    # P2-17：清 Cookie 之外，服务端吊销当前 token 的 jti——否则已签发 token 在
+    # 7 天 TTL 内仍然有效（泄密 token 无法作废，「退出登录」名不副实）。
+    _revoke_current_token(request)
     _clear_auth_cookies(response)
     return {"ok": True}
 

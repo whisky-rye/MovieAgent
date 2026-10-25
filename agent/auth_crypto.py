@@ -11,9 +11,11 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import time
 from typing import Optional
 
+from agent.token_blacklist import is_revoked
 from config.settings import settings
 
 
@@ -39,13 +41,18 @@ def hash_password(
 
 
 def issue_token(user_id: str, username: str, ttl: Optional[int] = None) -> str:
-    """签发 token：base64url(header).base64url(payload).hmac_sig。"""
+    """签发 token：base64url(header).base64url(payload).hmac_sig。
+
+    P2-17：payload 带 jti（随机唯一 ID）——logout 时按 jti 吊销，使服务端能
+    在 token 自然过期前拒绝它（此前 7 天 TTL 内泄密 token 无法作废）。
+    """
     ttl = ttl or settings.AUTH_TOKEN_TTL
     header = _b64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode("utf-8"))
     now = int(time.time())
     payload = _b64url_encode(
         json.dumps(
-            {"user_id": user_id, "username": username, "iat": now, "exp": now + ttl}
+            {"user_id": user_id, "username": username, "iat": now, "exp": now + ttl,
+             "jti": secrets.token_hex(8)}
         ).encode("utf-8")
     )
     signing_input = f"{header}.{payload}".encode("utf-8")
@@ -56,11 +63,12 @@ def issue_token(user_id: str, username: str, ttl: Optional[int] = None) -> str:
 
 
 def verify_token(token: str) -> Optional[dict]:
-    """验签 + 验期；任何失败返回 None（由依赖层转 401）。
+    """验签 + 验期 + 查吊销黑名单；任何失败返回 None（由依赖层转 401）。
 
     安全红线（P0-1）：AUTH_SECRET 未配置（空/空白）时**不采信任何 token**——
     空密钥下 HMAC 签名可被任意离线伪造，此时若仍接受 token 等同于允许冒充任意用户。
     （合法部署由启动校验保证：AUTH_ENABLED=true 时 AUTH_SECRET 必为强密钥。）
+    P2-17：验签验期通过后查 jti 黑名单——logout 吊销的 token 在此被拒。
     """
     if not token:
         return None
@@ -82,5 +90,7 @@ def verify_token(token: str) -> Optional[dict]:
     except Exception:
         return None
     if data.get("exp", 0) < int(time.time()):
+        return None
+    if is_revoked(str(data.get("jti") or "")):
         return None
     return data

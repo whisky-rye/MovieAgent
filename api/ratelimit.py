@@ -153,9 +153,11 @@ class RateLimiter:
     自动降级到内存模式（仅记一次告警），保证服务不中断。
     """
 
-    def __init__(self):
-        self.rate = float(settings.RATELIMIT_RATE)
-        self.burst = float(settings.RATELIMIT_BURST)
+    def __init__(self, rate: float | None = None, burst: float | None = None):
+        # rate/burst 可覆盖（P2-17：auth 路由用独立的「错误尝试」规格，与 LLM
+        # 入口的默认规格隔离）；省略时取 settings 默认值。
+        self.rate = float(settings.RATELIMIT_RATE if rate is None else rate)
+        self.burst = float(settings.RATELIMIT_BURST if burst is None else burst)
         self._memory: "OrderedDict[str, TokenBucket]" = OrderedDict()
         self._lock = threading.Lock()
         self._redis: Optional[RedisTokenBucket] = None
