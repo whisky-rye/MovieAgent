@@ -49,8 +49,8 @@ class Settings(BaseSettings):
     AUTH_COOKIE_SAMESITE: str = "lax"           # lax：允许同站跨端口（前端 5173 ↔ 后端 8000）携带
     CSRF_COOKIE_NAME: str = "ma_csrf"           # 双提交 CSRF token（非 HttpOnly，供前端 JS 读取）
     CSRF_HEADER_NAME: str = "X-CSRF-Token"      # 前端把 ma_csrf 值放入此请求头，后端校验一致
-    # None（默认）= 跟随鉴权总开关：AUTH_ENABLED=true → Secure（仅 HTTPS 传输）；
-    # 显式 true/false 可覆盖（如内网 HTTP 联调需显式 false）。
+    # None（默认）= 非 local 环境一律 True（仅 HTTPS 传输，防 token 被网络层窃听）；
+    # 仅 APP_ENV=local（本地开发）关闭。显式 true/false 可覆盖（如内网 HTTP 联调需显式 false）。
     COOKIE_SECURE: Optional[bool] = None
 
     # ---- 本地 Ollama（已就绪，仅核对） ----

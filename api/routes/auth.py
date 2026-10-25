@@ -84,21 +84,23 @@ class LoginReq(BaseModel):
 
 
 def _cookie_secure() -> bool:
-    """Cookie Secure 标志：跟随鉴权总开关 AUTH_ENABLED（true → 仅 HTTPS 传输）。
+    """Cookie Secure 标志（P2-18）：**默认 True**（仅 HTTPS 传输）。
 
     - COOKIE_SECURE 显式配置（true/false）优先，可覆盖（如内网 HTTP 联调需显式 false）；
-    - 未配置（None）时 = AUTH_ENABLED：鉴权开启即强制 Secure，杜绝 token 明文传输。
+    - 未配置（None）时：仅 APP_ENV=local（本地开发）关闭，其余环境一律 True。
+      此前默认跟随 AUTH_ENABLED——调试态（AUTH_ENABLED=false）下 Secure 也为
+      false，token 在 HTTP 部署/混合内容场景可被网络层窃听。
     """
     if settings.COOKIE_SECURE is not None:
         return settings.COOKIE_SECURE
-    return settings.AUTH_ENABLED
+    return settings.APP_ENV != "local"
 
 
 def _set_auth_cookies(resp: Response, token: str) -> None:
     """下发 ma_token（HttpOnly）+ ma_csrf（可读）双 Cookie。
 
-    - Secure 跟随鉴权总开关（见 _cookie_secure）：AUTH_ENABLED=true 时默认仅 HTTPS，
-      杜绝 token 明文传输；本地 HTTP 联调可显式 COOKIE_SECURE=false 覆盖。
+    - Secure 默认 True，仅 APP_ENV=local 且未显式配置时关闭（见 _cookie_secure）：
+      token 不因调试态/混合部署而明文传输；
     - SameSite=Lax：允许前端(5173) ↔ 后端(8000) 同站跨端口携带，同时挡住跨站 CSRF 顶层的 POST。
     - 仍返回 JSON 中的 token，便于非浏览器 API 客户端（Bearer）使用；浏览器前端只依赖 Cookie。
     """
