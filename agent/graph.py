@@ -264,6 +264,22 @@ def _sediment_preferences(state: AgentState) -> None:
 
 
 def _plan(state: AgentState) -> AgentState:
+    """按意图规划召回路（P2-10：六条 runner 的可达路径在此明示并接线）。
+
+    可达路径（全链路只有本函数产生 plan，_execute 按 plan 调 RUNNERS）：
+    - recommend / explain → search_by_text（MCP_ENABLED 时追加 search_prod
+      生产库补充通道；关闭时该路不进 plan，避免空路噪音）
+    - similar             → search_similar（P2-8 起展开为 content/relation/
+      graph 三路——其中 graph 路即知识图谱多跳召回，GRAPH_ENABLED=false
+      时该路为空，其余两路不受影响）
+    - board               → high_quality_board
+    - by_person           → search_by_person
+    - preference          → 无（跳过召回，直接走记忆回答）
+    search_graph 与 similar 的 graph 路同源（都是 graph_recall），经 similar
+    展开可达，不单独进 plan（避免同一召回路双路双权重）。
+    get_tools() 是预留的 tool-calling 入口（当前为规则式规划器，未启用
+    tool-calling 循环，见 agent/tools.py）。
+    """
     t0 = time.time()
     intent = state["intent"]
     slots = state.get("slots", {})
@@ -286,6 +302,10 @@ def _plan(state: AgentState) -> AgentState:
         plan = ["search_by_person"]
     else:  # recommend / explain -> 内容召回为主
         plan = ["search_by_text"]
+        # P2-10：生产库只读补充通道按开关接入——此前 search_prod 在规划器
+        # 不可达（六路召回的宣称名不副实），MCP_ENABLED=false 时该路恒空。
+        if settings.MCP_ENABLED:
+            plan.append("search_prod")
     elapsed = int((time.time() - t0) * 1000)
     if plan:
         step = _new_step(state, "plan", "route", f"规划工具链：{plan}",

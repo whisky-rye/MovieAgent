@@ -177,6 +177,8 @@ def _run_search_prod(slots: dict, prefs: dict, top_k: int = 20) -> list[Candidat
     - 仅在 `MCP_ENABLED=true` 且远端可达时产出候选；否则返回空列表（等价于该路不存在）。
     - 远端仅执行 SELECT（护栏 + 会话只读 + 限流 + 熔断），绝不写入。
     - 产出的 Candidate 携带 imdb_id/douban_id，可与本地召回做跨源归并（work_key）。
+    - 可达路径（P2-10）：`_plan` 在 MCP_ENABLED=true 时把它追加进 recommend/
+      explain 的 plan；此前该 runner 在规划器不可达，「生产库补充通道」名不副实。
     """
     if not settings.MCP_ENABLED:
         return []
@@ -223,7 +225,12 @@ RUNNERS = {
 
 
 def get_tools():
-    """返回 LangChain 工具（供交互式 tool-calling 使用）。"""
+    """返回 LangChain 工具（预留的 tool-calling 入口，P2-10 明示状态）。
+
+    当前生产链路是规则式规划器（agent/graph._plan 直接产 plan 调 RUNNERS），
+    **没有 tool-calling 循环消费本函数**——它面向未来切换到 LLM 自主选路
+    的场景，目前仅测试引用。六条召回 runner 的生产可达路径见 agent/graph._plan 的文档。
+    """
     return [search_by_text, search_similar, search_graph, search_by_person,
             search_prod, high_quality_board, remember_preference,
             explain_recommendation]
