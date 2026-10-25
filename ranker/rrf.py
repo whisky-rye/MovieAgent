@@ -9,27 +9,16 @@
 并最终仍过 MMR / 可选 LLM 精排（见 rerank）。v2.14 由 config.FUSION_STRATEGY 切换。
 """
 from retrieval.candidates import Candidate, merge_candidate, sort_by_score, work_key
-from ranker.scorer import _as_dict, _quality_pref, _feedback_term
+from ranker.scorer import (
+    _PLAN_TO_CANON,
+    _as_dict,
+    _canon_key,
+    _feedback_term,
+    _quality_pref,
+)
 
-# 顶层召回 dict 的 key（graph 规划名）映射到规范来源权重键，
-# 以修正原 score 路径「顶层 key 全回退等权 1.0」的隐性失效。
-# P2-8 起 search_similar 的三路以原始列表直接展开进顶层 recall（content/
-# relation/graph 各自权重生效），不再需要 "similar"→"content" 的整包映射；
-# 该映射保留仅为兼容历史调用方。
-_PLAN_TO_CANON = {
-    "search_by_text": "content",
-    "search_similar": "content",   # 历史兼容：旧版 similar 为内层融合整包
-    "similar": "content",          # 历史兼容：同上
-    "search_graph": "graph",       # 知识图谱多跳召回（F1/O12）
-    "search_by_person": "person",  # 按导演/演员找作品（实体中心召回）
-    "search_prod": "prod",         # 生产库只读通道补充召回（E4/MCP，默认关闭）
-    "high_quality_board": "coldstart",
-    "coldstart_fallback": "coldstart",
-}
-
-
-def _canon_key(k: str, mapping: dict) -> str:
-    return mapping.get(k, k)
+# 规划名 → 规范来源键的映射与规范化助手（P2-9 起与 fuse 共用，定义在 scorer；
+# 此处再导出，保持 `from ranker.rrf import _PLAN_TO_CANON` 的既有用法有效）
 
 
 def rrf_fuse(

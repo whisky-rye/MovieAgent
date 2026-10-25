@@ -5,6 +5,26 @@ from retrieval.candidates import Candidate, merge_candidate, sort_by_score, work
 # 各召回来源的默认融合权重（内容相似最高，关系次之，冷启动兜底最低）
 _DEFAULT_WEIGHTS = {"content": 1.0, "relation": 0.8, "coldstart": 0.6}
 
+# 顶层召回 dict 的 key（graph 规划名）→ 规范来源权重键。
+# P2-9：RRF 与 score 两条融合路径都必须做此规范化——此前只有 rrf_fuse 做，
+# fuse（score 回退路径）直接用规划名查 RRF_WEIGHTS_DICT 全部落 1.0，
+# 「向后兼容回退」实际把所有权重配置静默丢掉。
+_PLAN_TO_CANON = {
+    "search_by_text": "content",
+    "search_similar": "content",   # 历史兼容：旧版 similar 为内层融合整包
+    "similar": "content",          # 历史兼容：同上
+    "search_graph": "graph",       # 知识图谱多跳召回（F1/O12）
+    "search_by_person": "person",  # 按导演/演员找作品（实体中心召回）
+    "search_prod": "prod",         # 生产库只读通道补充召回（E4/MCP，默认关闭）
+    "high_quality_board": "coldstart",
+    "coldstart_fallback": "coldstart",
+}
+
+
+def _canon_key(k: str, mapping: dict | None = None) -> str:
+    """规划名 → 规范来源名（未映射的原样返回）。"""
+    return (mapping or _PLAN_TO_CANON).get(k, k)
+
 
 def _minmax(vals: list[float]) -> dict[float, float]:
     if not vals:
@@ -85,7 +105,10 @@ def fuse(
     explain=True 时返回 (ranked_list, explain_map)，explain_map[id] 含各路归一化分、
     质量/偏好分、来源集合与最终综合分，供 P4 步骤可视化「各路排名来源」。
     """
-    w = weights or _DEFAULT_WEIGHTS
+    # P2-9：权重键与来源键都规范化到规范名（content/relation/coldstart/graph/
+    # person/prod）——规划名（search_by_text/high_quality_board...）直接查
+    # RRF_WEIGHTS_DICT 会全部落 1.0，score 回退路径的权重配置曾因此静默失效。
+    w = {_canon_key(k): float(v) for k, v in (weights or _DEFAULT_WEIGHTS).items()}
     norm: dict[str, dict[float, float]] = {}
     for src, cands in recall.items():
         norm[src] = _minmax([c.score for c in cands])
@@ -94,7 +117,7 @@ def fuse(
     wkid: dict[str, str] = {}        # work_key -> 代表候选 id（跨源归并后可能变化）
     emap: dict[str, dict] = {}
     for src, cands in recall.items():
-        src_w = w.get(src, 1.0)
+        src_w = w.get(_canon_key(src), 1.0)
         for c in cands:
             wk = work_key(c)
             base = src_w * norm[src].get(c.score, 0.5)
