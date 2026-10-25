@@ -336,6 +336,11 @@ def _execute(state: AgentState) -> AgentState:
     prefs = get_memory_store().get_prefs(uid)
     user_genres = prefs.get("genres")
     feedback_profile = _feedback_profile_for(uid)
+    # P2-11：top_k 从 state 下传（/recommend 的 req.top_k，1~50）。此前 rerank
+    # 硬编码 top_k=20，req.top_k>20 被静默截断——接口收 50 实际最多返 20。
+    top_k = int(state.get("top_k") or 20)
+    # 召回池不小于 20：融合/MMR/精排都需要足够候选才有挑选空间（与最终条数解耦）
+    recall_k = max(20, top_k)
     recall: dict[str, list] = {}
     try:
         for name in state.get("plan", []):
@@ -345,7 +350,7 @@ def _execute(state: AgentState) -> AgentState:
                 # score 预融合再当单路返回，relation/graph 权重只在内层生效、
                 # 外层把整包当 content(1.0)，且 min-max 量级脆弱性在该路径复活。
                 for src, lst in RUNNERS["search_similar"](
-                    slots.get("item_id"), top_k=20
+                    slots.get("item_id"), top_k=recall_k
                 ).items():
                     if lst:  # 空路不建键（保持 recall_counts 干净）
                         recall.setdefault(src, []).extend(lst)
@@ -355,10 +360,10 @@ def _execute(state: AgentState) -> AgentState:
                 if name == "search_by_text" and not slots.get("query"):
                     fb = state.get("query") or (" ".join(user_genres) if user_genres else "高分好看的作品")
                     eff = {**slots, "query": fb}
-                recall[name] = RUNNERS[name](eff, prefs, top_k=20)
+                recall[name] = RUNNERS[name](eff, prefs, top_k=recall_k)
         res = rerank(recall, diversify=settings.RERANK_DIVERSIFY,
                      llm_topn=settings.RERANK_LLM_TOPN, query=state.get("query"),
-                     top_k=20, user_genres=user_genres,
+                     top_k=top_k, user_genres=user_genres,
                      feedback_profile=feedback_profile, explain=True)
         fusion_detail = res.get("fusion_detail") if isinstance(res, dict) else {}
         ranked = res["ranked"] if isinstance(res, dict) else res

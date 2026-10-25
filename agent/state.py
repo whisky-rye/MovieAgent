@@ -30,6 +30,8 @@ class AgentState(TypedDict, total=False):
     intent: str                     # recommend | similar | board | explain | preference
     slots: dict                     # 意图解析出的结构化槽位（query/genres/country/...）
     plan: list[str]                 # 规划要执行的工具名列表
+    top_k: int                      # 最终返回条数（P2-11：/recommend 的 top_k 下传，
+                                    # _execute 据此决定召回池与 rerank 收口；省略=20）
     messages: Annotated[list[BaseMessage], add_messages]
     candidates: dict[str, list[Candidate]]   # 各召回来源 -> 候选
     ranked: list[Candidate]         # 融合+重排后的最终候选

@@ -372,11 +372,15 @@ def _log_impressions(user_id: str, query: str, ranked: list) -> None:
     get_feedback_store().record_impressions(user_id, query, rows)
 
 
-def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[str] = None) -> dict:
+def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[str] = None,
+         top_k: int | None = None) -> dict:
     """同步跑 Agent，返回完整 state（answer + ranked 候选）。
 
     护栏（P5 补充）：在锁之前先做内容安全判定——命中敏感/越域直接返回，
     不进入 Agent、不消耗云端额度。放行才进入串行化调用。
+
+    top_k（P2-11）：最终返回条数，下传进 agent state 由 _execute 消费；
+    省略=20（历史行为，/chat 等无 top_k 概念的入口）。
     """
     if not request_id:
         request_id = uuid.uuid4().hex[:12]
@@ -418,6 +422,7 @@ def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[st
                 "query": query,
                 "request_id": request_id,
                 "history": history,
+                "top_k": int(top_k or 20),
                 "steps": [],
                 "thinking": {},
             },
@@ -447,7 +452,9 @@ def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[st
 class RecommendReq(BaseModel):
     query: str = Field(..., min_length=1, description="用户自然语言查询")
     user_id: str = "default"
-    top_k: int = Field(default=10, ge=1, le=50)
+    # P2-11：top_k 真实下传至 agent（_execute 据此决定召回池与 rerank 收口）；
+    # 此前 rerank 硬编码 20，>20 被静默截断
+    top_k: int = Field(default=10, ge=1, le=50, description="返回条数（1~50，真实生效）")
     session_id: Optional[str] = Field(
         default=None, description="会话 ID（多会话管理；空=临时对话不落库）"
     )
@@ -622,7 +629,10 @@ def recommend(
     request_id = request.state.request_id
     t0 = time.time()
     try:
-        state = _run(req.query, auth.user_id, request_id=request_id, session_id=req.session_id)
+        # P2-11：req.top_k（1~50）下传 agent——此前 rerank 硬编码 20，
+        # top_k>20 被静默截断（接口收 50 实际最多返 20）
+        state = _run(req.query, auth.user_id, request_id=request_id,
+                     session_id=req.session_id, top_k=req.top_k)
     except RateLimited as e:  # 限流触发：标准 429 + Retry-After（埋点已在限流器内统一计数）
         raise HTTPException(
             status_code=429,
@@ -797,6 +807,7 @@ async def recommend_stream(
         "query": req.query,
         "request_id": request_id,
         "history": _build_history(req.session_id),
+        "top_k": req.top_k,  # P2-11：与 /recommend 一致下传（省略=20）
         "steps": [],
         "thinking": {},
         # 流式钩子：把步骤 / 思考 / token 增量实时推入事件队列（统一包装为 (type, data)）
