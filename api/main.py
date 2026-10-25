@@ -274,6 +274,9 @@ def _candidate_to_dict(c: Candidate) -> dict:
         "douban_id": c.douban_id or "",
         "imdb_id": c.imdb_id or "",
         "title_alt": c.title_alt or "",
+        # P2-12：可解释关系链（图谱召回产出）——此前漏字段，穿过 ranker 链后在
+        # API 序列化与语义缓存回包时被静默丢弃，前端永远拿不到
+        "graph_paths": c.graph_paths or [],
     }
 
 
@@ -294,6 +297,7 @@ def _dict_to_candidate(d: dict) -> Candidate:
         douban_id=d.get("douban_id") or "",
         imdb_id=d.get("imdb_id") or "",
         title_alt=d.get("title_alt") or "",
+        graph_paths=list(d.get("graph_paths") or []),  # P2-12：关系链随回包复原
     )
 
 
