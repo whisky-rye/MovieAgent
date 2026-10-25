@@ -23,10 +23,6 @@ from retrieval.candidates import normalize_genres
 logger = logging.getLogger("movie_agent.memory")
 
 
-class MemoryStoreError(RuntimeError):
-    """偏好记忆运行期错误（MySQL 读写失败等）；接口层据此返回 500。"""
-
-
 class MemoryStore(ABC):
     """偏好记忆抽象：整份 {user_id, preferences, history} 的读写。"""
 

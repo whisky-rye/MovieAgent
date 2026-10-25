@@ -23,10 +23,6 @@ from config.settings import settings
 logger = logging.getLogger("movie_agent.user_store")
 
 
-class UserStoreError(RuntimeError):
-    """用户存储运行期错误（MySQL 读写失败等）；接口层据此返回 500。"""
-
-
 class MySQLUserStore:
     """用户账户的强 MySQL 后端：落 movie_agent.users；不可用即启动失败，无任何兜底。"""
 

@@ -71,8 +71,11 @@ def _new_step(state: AgentState, node: str, kind: str, summary: str,
     }
 
 
-# 召回来源 → 中文标签（用于融合可解释步骤的可读展示）
-_SRC_CN = {"content": "内容", "relation": "关系", "coldstart": "冷启动", "person": "人物"}
+# 召回来源（规范名）→ 中文标签（用于融合可解释步骤的可读展示）。
+# P2-13：补 graph/prod——similar 三路展开（P2-8）后 relation 为活键，
+# 图谱多跳与生产库补充通道接入（P2-10）后 graph/prod 也会出现在 ranks 里。
+_SRC_CN = {"content": "内容", "relation": "关系", "coldstart": "冷启动",
+           "person": "人物", "graph": "图谱", "prod": "生产库"}
 
 
 def _fmt_fusion_explain(fusion_detail: dict, ranked: list, n: int = 5) -> list[str]:

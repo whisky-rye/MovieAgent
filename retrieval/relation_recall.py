@@ -2,17 +2,12 @@
 
 开发期走 MySQL 关系表（douban_name_relate / imdb_name_relate），
 生产期可无缝换成 Neo4j 图查询（接口不变，见架构文档第 5 节）。
+
+注：职位权重硬编码在 SQL 的 CASE 表达式里（导演 > 编剧 > 卡司）；此处不再
+保留第二份未消费的权重字典（P2-13 死代码清理，改权重视 SQL 内联处）。
 """
 from retrieval.candidates import Candidate, split_genres
 from db.session import fetch_all
-
-# 不同职位的关联权重（导演权重最高，编剧次之，卡司/其他最低）
-_ROLE_WEIGHT = {
-    "director": 2.5, "导演": 2.5,
-    "writer": 1.5, "编剧": 1.5,
-    "cast": 1.0, "主演": 1.0, "actor": 1.0,
-}
-_DEF_WEIGHT = 1.0
 
 
 def relation_recall(item_id: str, top_k: int = 20) -> list[Candidate]:

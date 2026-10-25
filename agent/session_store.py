@@ -24,10 +24,6 @@ from config.settings import settings
 logger = logging.getLogger("movie_agent.session")
 
 
-class SessionStoreError(RuntimeError):
-    """会话存储运行期错误（MySQL 读写失败等）；接口层据此返回 500。"""
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

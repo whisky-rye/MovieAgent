@@ -19,10 +19,6 @@ from config.settings import settings
 logger = logging.getLogger("movie_agent.share")
 
 
-class ShareStoreError(RuntimeError):
-    """共享存储运行期错误（MySQL 读写失败等）；接口层据此返回 500。"""
-
-
 def _new_token() -> str:
     return secrets.token_hex(16)  # 32 hex chars，密码学随机，不可猜测
 
