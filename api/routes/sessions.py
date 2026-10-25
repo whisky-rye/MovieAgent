@@ -40,11 +40,13 @@ def _decorate_share(session: dict) -> dict:
 class SessionCreateReq(BaseModel):
     # 兼容旧契约保留该字段，但真实 user_id 一律取自鉴权依赖（auth.user_id），本字段被忽略
     user_id: str = Field(default="default", description="(已弃用) user_id 现由鉴权依赖注入")
-    title: Optional[str] = Field(default=None, description="会话标题（可选，默认'新会话'）")
+    # P2-15：标题上限——无上限时单行可存任意长文本，列表/导出时撑爆 payload
+    title: Optional[str] = Field(default=None, max_length=100,
+                                 description="会话标题（可选，默认'新会话'，≤100 字）")
 
 
 class SessionRenameReq(BaseModel):
-    title: str = Field(..., min_length=1, description="新标题")
+    title: str = Field(..., min_length=1, max_length=100, description="新标题（≤100 字）")
 
 
 @router.post("")

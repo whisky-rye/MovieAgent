@@ -407,6 +407,11 @@ def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[st
             "guardrail": {"action": g.action, "category": g.category, "reason": g.reason},
         }
 
+    # P2-15：放行后全链路改用净化/截断后的 query——此前 sanitize_query 的截断
+    # 结果不返回，原始 query（几十 KB）全额进嵌入/云端调用，护栏的长度上限
+    # 形同虚设。此后 embed/LLM/agent state 看到的都是 g.sanitized_query。
+    query = g.sanitized_query or query
+
     # 限流（P5 补充）：仅护栏放行、且非缓存命中的真实 LLM 调用才消耗令牌。
     # 放在锁之前——否则排队中的请求都占锁等待，限流失去意义。
     if settings.RATELIMIT_ENABLED:
@@ -454,7 +459,11 @@ def _run(query: str, user_id: str, request_id: str = "", session_id: Optional[st
 
 
 class RecommendReq(BaseModel):
-    query: str = Field(..., min_length=1, description="用户自然语言查询")
+    # P2-15：max_length 与 GUARDRAIL_MAX_QUERY_LEN 对齐——超长在边缘直接 422，
+    # 不再悄悄放行后依赖护栏截断（截断仍作为 agent 内部调用的兜底保留）
+    query: str = Field(..., min_length=1,
+                       max_length=settings.GUARDRAIL_MAX_QUERY_LEN,
+                       description="用户自然语言查询")
     user_id: str = "default"
     # P2-11：top_k 真实下传至 agent（_execute 据此决定召回池与 rerank 收口）；
     # 此前 rerank 硬编码 20，>20 被静默截断
@@ -465,7 +474,8 @@ class RecommendReq(BaseModel):
 
 
 class ChatReq(BaseModel):
-    query: str = Field(..., min_length=1)
+    # P2-15：与 RecommendReq 对齐的长度上限（超长 422，护栏截断作内部兜底）
+    query: str = Field(..., min_length=1, max_length=settings.GUARDRAIL_MAX_QUERY_LEN)
     user_id: str = "default"
     # P1-3：/chat 原先不接 session_id —— 永远无历史上下文、永不落库，
     # "流式对话"实际是单轮玩具；现与 /recommend/stream 对齐。

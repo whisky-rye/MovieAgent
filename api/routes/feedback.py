@@ -8,7 +8,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.deps import CurrentUser, get_current_user
 from agent.feedback_store import (
@@ -34,11 +34,13 @@ SIGNAL_CANCEL = "cancel"
 
 
 class FeedbackReq(BaseModel):
-    item_id: str
+    # P2-15：字段上限——item_id 对齐 Candidate id 形态（douban:{PK}/imdb:{tt..}）；
+    # query 对齐 user_feedback.query 列（VARCHAR(255)），超长会在入库时被截断/报错
+    item_id: str = Field(..., max_length=64)
     signal: str  # like | dislike | click | cancel
     genres: list[str] | None = None
     rank: int | None = None
-    query: str | None = None
+    query: str | None = Field(default=None, max_length=255)
 
 
 @router.post("/feedback")

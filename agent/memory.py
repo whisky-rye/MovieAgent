@@ -22,6 +22,11 @@ from retrieval.candidates import normalize_genres
 
 logger = logging.getLogger("movie_agent.memory")
 
+# 偏好画像 history 滚动窗口（P2-15）：重度用户每轮推荐都沉淀一条，无 cap 时
+# preferences 单行无限增长、且每次全量重写整行；保留最近 N 条（含 ts/intent/
+# query/top_title），更早的随画像滚动淘汰。
+PREF_HISTORY_MAX = 50
+
 
 class MemoryStore(ABC):
     """偏好记忆抽象：整份 {user_id, preferences, history} 的读写。"""
@@ -99,7 +104,8 @@ class MemoryStore(ABC):
         - genres 过词表闸门（P1-1）后去重合并；directors/actors/people 为人名/片名，
           自由文本不做词表校验；
         - note 覆盖写（latest wins）；
-        - history_item 非 None 时追加到 history（避免无限膨胀由调用方控制频率）；
+        - history_item 非 None 时追加到 history 并做滚动窗口（PREF_HISTORY_MAX，
+          见模块常量——避免无限膨胀由存储侧保证，不依赖调用方自觉）；
         - 经 self.update 单事务原子完成（P1-2），子类无需各自实现。
         """
         clean_genres = normalize_genres(genres)
@@ -122,7 +128,10 @@ class MemoryStore(ABC):
             if note:
                 prefs["note"] = note
             if history_item:
-                d.setdefault("history", []).append(history_item)
+                hist = d.setdefault("history", [])
+                hist.append(history_item)
+                if len(hist) > PREF_HISTORY_MAX:
+                    del hist[:-PREF_HISTORY_MAX]  # 滚动窗口：淘汰最旧，保留最近 N 条
             return prefs
 
         return self.update(user_id, _mut)

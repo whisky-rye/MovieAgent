@@ -26,7 +26,8 @@ class PrefPutReq(BaseModel):
     user_id: str = Field(default="default", description="(已弃用) user_id 现由鉴权依赖注入")
     genres: Optional[List[str]] = Field(default=None, description="追加的偏好类型（去重合并）")
     remove_genres: Optional[List[str]] = Field(default=None, description="要删除的偏好类型（从 genres 中剔除）")
-    note: Optional[str] = Field(default=None, description="偏好备注（覆盖写）")
+    # P2-15：note 上限——偏好备注进 preferences JSON 单行，无上限时一次 PUT 可写入任意长文本
+    note: Optional[str] = Field(default=None, max_length=500, description="偏好备注（覆盖写，≤500 字）")
     preferences: Optional[dict] = Field(
         default=None,
         description="任意额外键值，合并进 preferences（genres 去重合并，其余覆盖写）",

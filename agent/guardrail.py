@@ -124,6 +124,9 @@ class GuardrailResult:
     message: str     # 返回给用户的文本（allow 时为空）
     risk_score: float = 0.0       # 风险评分（0=安全），便于观测/接专业审核
     features: list = field(default_factory=list)  # 命中的风险特征（可观测）
+    sanitized_query: str = ""     # P2-15：净化/截断后的 query。全链路（embed/LLM/
+    # 缓存键/日志）必须改用此值——此前 sanitize_query 的截断结果不随结果返回，
+    # 原始 query 全额进嵌入与云端调用，GUARDRAIL_MAX_QUERY_LEN 形同虚设。
 
 
 # ============================ 第 0 层：输入净化 ============================
@@ -238,19 +241,24 @@ def _llm_check(query: str) -> "str | None":
 def check_guardrail(query: str) -> GuardrailResult:
     """第 1 层输入网关：返回护栏判定结果。
 
-    - GUARDRAIL_ENABLED=False：直接放行。
+    - GUARDRAIL_ENABLED=False：直接放行（仍做字符级净化，sanitized_query 可用）。
     - rule 模式：纯本地规则，零额度。
     - hybrid 模式：rule 判 guide 的边界 case 再用 chat_light 复核（保守：复核失败维持引导）。
+
+    P2-15：所有返回路径都带 sanitized_query（净化+截断到 GUARDRAIL_MAX_QUERY_LEN），
+    调用方（api/main._run）放行后必须把它作为后续全链路的 query。
     """
     if not settings.GUARDRAIL_ENABLED:
-        return GuardrailResult("allow", "ok", "护栏关闭", "", risk_score=0.0)
+        return GuardrailResult("allow", "ok", "护栏关闭", "", risk_score=0.0,
+                               sanitized_query=sanitize_query(query or ""))
 
     raw = query or ""
     # 零宽/控制字符混淆（编码绕过攻击）：在净化前于原始输入上检测，避免被剔除后漏判
     if len(_ZERO_WIDTH.findall(raw)) > _ZERO_WIDTH_BLOCK_THRESHOLD:
         return GuardrailResult(
             "block", "injection", "零宽字符混淆/编码绕过",
-            _INJECTION_MESSAGE, risk_score=0.9, features=["injection:zero_width_obfuscation"])
+            _INJECTION_MESSAGE, risk_score=0.9, features=["injection:zero_width_obfuscation"],
+            sanitized_query=sanitize_query(raw))
 
     # 先净化输入（字符级），再做规则判定
     q = sanitize_query(raw)
@@ -259,8 +267,11 @@ def check_guardrail(query: str) -> GuardrailResult:
     if settings.GUARDRAIL_MODE == "hybrid" and res.action == "guide" and res.category == "offtopic":
         verdict = _llm_check(q)
         if verdict == "allow":
-            return GuardrailResult("allow", "ok", "hybrid 复核放行", "", risk_score=0.0)
+            return GuardrailResult("allow", "ok", "hybrid 复核放行", "", risk_score=0.0,
+                                   sanitized_query=q)
 
+    # P2-15：把净化后的 query 挂到结果上（_rule_check 不感知该字段，在此统一补）
+    res.sanitized_query = q
     return res
 
 
