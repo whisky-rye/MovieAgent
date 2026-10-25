@@ -320,7 +320,15 @@ def _execute(state: AgentState) -> AgentState:
     try:
         for name in state.get("plan", []):
             if name == "search_similar":
-                recall["similar"] = RUNNERS["search_similar"](slots.get("item_id"), top_k=20)
+                # P2-8：similar 的三路（content/relation/graph）以原始列表展开进
+                # recall，交外层 RRF 按各自权重统一融合——此前 runner 内层先做
+                # score 预融合再当单路返回，relation/graph 权重只在内层生效、
+                # 外层把整包当 content(1.0)，且 min-max 量级脆弱性在该路径复活。
+                for src, lst in RUNNERS["search_similar"](
+                    slots.get("item_id"), top_k=20
+                ).items():
+                    if lst:  # 空路不建键（保持 recall_counts 干净）
+                        recall.setdefault(src, []).extend(lst)
             else:
                 # query 兜底：内容召回若 slots 无 query，用原始输入或偏好类型
                 eff = slots

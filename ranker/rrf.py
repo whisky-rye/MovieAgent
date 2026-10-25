@@ -13,11 +13,13 @@ from ranker.scorer import _as_dict, _quality_pref, _feedback_term
 
 # 顶层召回 dict 的 key（graph 规划名）映射到规范来源权重键，
 # 以修正原 score 路径「顶层 key 全回退等权 1.0」的隐性失效。
-# 内部 search_similar 已用规范键 content/relation，映射后保持不变。
+# P2-8 起 search_similar 的三路以原始列表直接展开进顶层 recall（content/
+# relation/graph 各自权重生效），不再需要 "similar"→"content" 的整包映射；
+# 该映射保留仅为兼容历史调用方。
 _PLAN_TO_CANON = {
     "search_by_text": "content",
-    "search_similar": "content",   # 内部已融合 content+relation+graph
-    "similar": "content",          # graph 顶层 similar 也是已融合列表
+    "search_similar": "content",   # 历史兼容：旧版 similar 为内层融合整包
+    "similar": "content",          # 历史兼容：同上
     "search_graph": "graph",       # 知识图谱多跳召回（F1/O12）
     "search_by_person": "person",  # 按导演/演员找作品（实体中心召回）
     "search_prod": "prod",         # 生产库只读通道补充召回（E4/MCP，默认关闭）

@@ -171,7 +171,10 @@ def test_content_recall_missing_item_returns_empty(monkeypatch):
 
 
 def test_run_search_similar_isolates_failing_path(monkeypatch):
-    """similar 三路中一路炸 → 只丢该路，其余路候选仍进融合结果（P1-7）。"""
+    """similar 三路中一路炸 → 只丢该路，其余路候选仍进融合结果（P1-7+P2-8）。
+
+    P2-8 起 runner 返回三路原始列表 dict（不再内层预融合），隔离语义不变。
+    """
     good = Candidate(id="douban:2", source="douban", title="盗梦空间",
                      recall_source="relation", score=1.0)
 
@@ -182,11 +185,11 @@ def test_run_search_similar_isolates_failing_path(monkeypatch):
     monkeypatch.setattr(tools_mod, "relation_recall", lambda *a, **k: [good])
     monkeypatch.setattr(tools_mod, "graph_recall", lambda *a, **k: [])
     out = tools_mod._run_search_similar("douban:1", top_k=5)
-    assert [c.id for c in out] == ["douban:2"]
+    assert out == {"content": [], "relation": [good], "graph": []}
 
 
 def test_run_search_similar_all_fail_returns_empty(monkeypatch):
-    """三路全挂 → 空列表（交 reflect 冷启动兜底），不抛异常。"""
+    """三路全挂 → 三路皆空（交 reflect 冷启动兜底），不抛异常。"""
 
     def _boom(*a, **k):
         raise RuntimeError("down")
@@ -194,7 +197,8 @@ def test_run_search_similar_all_fail_returns_empty(monkeypatch):
     monkeypatch.setattr(tools_mod, "content_recall", _boom)
     monkeypatch.setattr(tools_mod, "relation_recall", _boom)
     monkeypatch.setattr(tools_mod, "graph_recall", _boom)
-    assert tools_mod._run_search_similar("douban:1", top_k=5) == []
+    out = tools_mod._run_search_similar("douban:1", top_k=5)
+    assert out == {"content": [], "relation": [], "graph": []}
 
 
 def test_run_search_by_text_isolates_failure(monkeypatch):

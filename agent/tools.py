@@ -130,19 +130,23 @@ def _run_search_by_text(slots: dict, prefs: dict, top_k: int = 20) -> list[Candi
     )
 
 
-def _run_search_similar(item_id: str, top_k: int = 20) -> list[Candidate]:
+def _run_search_similar(item_id: str, top_k: int = 20) -> dict[str, list[Candidate]]:
+    """similar 三路召回：返回 content/relation/graph **原始列表**（P2-8）。
+
+    此前这里先做一层内层 score 预融合（rerank strategy="score"）再当单路返回：
+    - relation 0.8 / graph 0.7 的权重只在内层生效，外层 RRF 把整包当
+      content(1.0)（_PLAN_TO_CANON 的 "similar"→"content"），配置的源权重
+      实际失效；
+    - min-max 归一化的量级脆弱性在该路径复活（相似度/关联度/图谱分量级不可比）。
+    现在直接返回三路原始列表，由 graph._execute 展开进外层 recall，与 by_text
+    等路径走同一条 RRF 统一融合链路（权重/量级免疫/新增路零成本）。
+    """
     # P1-7：三路各自隔离——一路失败只丢该路候选，不拖垮整条 similar 召回
     sim = _safe_recall(content_recall, item_id=item_id, top_k=top_k)
     rel = _safe_recall(relation_recall, item_id=item_id, top_k=top_k)
     # F1/O12：知识图谱多跳扩展，与内容/关系召回一并融合，覆盖「同导演其它作品」「合作网络」等
     graph_cands = _safe_recall(graph_recall, item_id, top_k=top_k)
-    if not (sim or rel or graph_cands):
-        return []
-    fused = rerank(
-        {"content": sim, "relation": rel, "graph": graph_cands},
-        strategy="score", top_k=top_k,
-    )
-    return fused
+    return {"content": sim, "relation": rel, "graph": graph_cands}
 
 
 def _run_search_graph(item_id: str, top_k: int = 20) -> list[Candidate]:

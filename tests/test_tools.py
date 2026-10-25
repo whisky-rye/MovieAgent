@@ -30,20 +30,29 @@ def test_get_tools_count():
     assert len(tools.get_tools()) == 8
 
 
-def test_run_search_similar_fuses():
+def test_run_search_similar_returns_three_raw_lists():
+    """P2-8：similar 返回三路原始列表（不再内层预融合），交外层 RRF 统一融合。"""
     sim = [Candidate(id="douban:1", source="douban", title="A", score=0.9)]
     rel = [Candidate(id="douban:2", source="douban", title="B", score=5.0)]
     graph = [Candidate(id="douban:3", source="douban", title="C", score=1.2)]
-    fake_ranked = [Candidate(id="douban:1", source="douban", title="A", score=2.0)]
     with patch.object(tools, "content_recall", return_value=sim), \
          patch.object(tools, "relation_recall", return_value=rel), \
          patch.object(tools, "graph_recall", return_value=graph), \
-         patch.object(tools, "rerank", return_value=fake_ranked) as mock_rerank:
+         patch.object(tools, "rerank") as mock_rerank:
         out = tools._run_search_similar("douban:1", top_k=5)
-        # 三路召回（content/relation/graph）都并入 rerank（recall 字典为位置参数）
-        assert set(mock_rerank.call_args.args[0].keys()) == {
-            "content", "relation", "graph"}
-    assert out is fake_ranked
+        # 三路原始列表直出；runner 内不再调用 rerank（预融合已移除）
+        assert out == {"content": sim, "relation": rel, "graph": graph}
+        mock_rerank.assert_not_called()
+
+
+def test_run_search_similar_isolates_failing_path():
+    """一路失败只丢该路（P1-7 隔离仍在），其余两路照常返回。"""
+    sim = [Candidate(id="douban:1", source="douban", title="A", score=0.9)]
+    with patch.object(tools, "content_recall", side_effect=RuntimeError("boom")), \
+         patch.object(tools, "relation_recall", return_value=sim), \
+         patch.object(tools, "graph_recall", return_value=[]):
+        out = tools._run_search_similar("douban:1", top_k=5)
+    assert out == {"content": [], "relation": sim, "graph": []}
 
 
 def test_run_search_prod_disabled_returns_empty():
