@@ -521,7 +521,7 @@ def health():
     except Exception as e:  # noqa: BLE001
         checks["ratelimit"] = {"backend": "unknown", "healthy": False, "error": str(e)[:120]}
 
-    # 5) 告警循环活性（未配置周期=不适用，算健康；僵死算不健康）
+    # 5) 告警循环活性（未配置周期=不适用，算健康；僵死/未启动算不健康）
     loop = alert_loop_status()
     checks["alert_loop"] = {"healthy": (not loop["configured"]) or loop["running"], **loop}
 
@@ -532,7 +532,11 @@ def health():
         exhausted = []
     checks["llm_exhausted"] = {"healthy": not exhausted, "models": exhausted}
 
-    critical = ("mysql", "vector", "alert_loop")
+    # 关键依赖：业务库 / 向量库——不可用即 down（服务核心功能受损）。
+    # alert_loop 与 llm_exhausted 是有可观测性/容错余量的旁路：循环没起或有模型
+    # 熔断时核心链路仍可服务，记 degraded 不记 down（裸 TestClient 不跑 lifespan
+    # 时也不至于把 /health 打成 503 假警报）。
+    critical = ("mysql", "vector")
     down = [k for k in critical if not checks[k]["healthy"]]
     degraded = [k for k, v in checks.items() if not v["healthy"] and k not in down]
     status = "down" if down else ("degraded" if degraded else "ok")

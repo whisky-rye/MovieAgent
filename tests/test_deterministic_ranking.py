@@ -36,6 +36,15 @@ def _c(i, score, genres=("剧情",)):
                      year=2000, genres=list(genres), score=score)
 
 
+@pytest.fixture(autouse=True)
+def _reset_llm_singleton():
+    """每个用例前清空精排客户端单例（跨文件共享的 _LLM 缓存会污染 monkeypatch）。"""
+    import ranker.llm_rerank as _lr
+    _lr._reset_llm()
+    yield
+    _lr._reset_llm()
+
+
 # ---------- sort_by_score ----------
 
 def test_sort_by_score_descending_with_id_tiebreak():
