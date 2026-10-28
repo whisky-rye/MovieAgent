@@ -14,7 +14,7 @@ api/        → agent/ → retrieval/ + ranker/ → vector/ + graph/ → etl/ + 
 ```
 - `agent/`：LangGraph 状态图（意图 → 规划 → 召回 → 反思兜底 → 生成）
 - `retrieval/` + `ranker/`：多路召回 + MMR 重排
-- `vector/`：Chroma（开发期）；`graph/`：知识图谱占位
+- `vector/`：Chroma（开发期）；`graph/`：知识图谱召回（多跳 BFS + 生产可换 Neo4j）
 - `llm/`：`LLM_PROVIDER=ollama|cloud` 开关；云端走 OpenAI 兼容 + **强弱分档**（`CLOUD_LLM_STRONG/LIGHT_MODEL_LIST`，各自独立按序降级）+ 免费额度熔断 + **本地兜底**（`APP_ENV=local` 时云端全失败回退 Ollama deepseek）
 
 ---
@@ -300,7 +300,7 @@ movie_agent/
 ├── retrieval/      # 多路召回
 ├── ranker/         # MMR 重排
 ├── vector/         # Chroma 后端（backend.py 抽象，预留 Qdrant）
-├── graph/          # 知识图谱占位
+├── graph/          # 知识图谱召回（schema/store/recall，多跳 BFS）
 ├── etl/            # 建库脚本
 ├── db/             # MySQL 访问
 ├── config/         # settings.py（读 .env）
