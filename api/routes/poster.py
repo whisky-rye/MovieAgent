@@ -10,10 +10,11 @@ import glob
 import os
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from agent.poster import get_poster_status
+from api.deps import CurrentUser, get_current_user
 from config.settings import settings
 
 router = APIRouter(prefix="/poster", tags=["poster"])
@@ -55,16 +56,39 @@ def _resolve_poster_path(session_id: str, info: dict) -> str | None:
     return None
 
 
+def _enforce_poster_access(info: dict, auth: CurrentUser) -> None:
+    """鉴权 + 归属校验（P2-19）：未登录拒绝（401 由依赖注入负责）；
+
+    生产态（AUTH_ENABLED=true）校验海报归属当前用户（manifest 内已落 user_id），
+    非本人返回 403；调试态（AUTH_ENABLED=false）user_id 由客户端指定，不强制归属。
+    """
+    if not settings.AUTH_ENABLED:
+        return
+    owner = info.get("user_id")
+    if owner is None or owner != auth.user_id:
+        raise HTTPException(status_code=403, detail="无权访问该会话的海报")
+
+
 @router.get("/{session_id}")
-def poster_status(session_id: str):
+def poster_status(
+    session_id: str,
+    auth: CurrentUser = Depends(get_current_user),
+):
     """前端轮询：海报生成进度与可展示信息。"""
-    return get_poster_status(session_id)
+    info = get_poster_status(session_id)
+    _enforce_poster_access(info, auth)
+    return info
 
 
 @router.get("/download/{session_id}")
-def poster_download(session_id: str, request: Request):
+def poster_download(
+    session_id: str,
+    request: Request,
+    auth: CurrentUser = Depends(get_current_user),
+):
     """返回生成的海报文件（png/mp4）。?download=1 强制附件下载。"""
     info = get_poster_status(session_id)
+    _enforce_poster_access(info, auth)
     if info.get("status") != "ready":
         raise HTTPException(status_code=404, detail="海报尚未生成或不可用")
     path = _resolve_poster_path(session_id, info)

@@ -221,6 +221,14 @@ def generate_explanation(query: str, ranked: list[Candidate],
     """端到端：检索上下文 + 强档 LLM -> 解释性推荐语（非流式，返回 str）。
 
     流式场景请直接用 `_generate_rich(..., token_sink=, thinking_sink=)`。
+
+    P2-19：输出护栏下沉到 generate 出口。语义缓存近义命中路径（api/main.py 直接
+    调用本函数重生成解说）此前绕过输出护栏，现统一在此闸门处拦截注入回显 / 泄漏。
     """
     text, _ = _generate_rich(query, ranked, prefs, user_id, request_id)
+    # 第 3 层输出网关：扫描注入回显 / 策略泄漏（GUARDRAIL_OUTPUT_GATE 关闭则放行）
+    from agent.guardrail import check_output
+    gate = check_output(text)
+    if gate.action == "block":
+        return gate.message
     return text

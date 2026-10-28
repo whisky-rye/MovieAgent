@@ -309,10 +309,33 @@ class BaiLianVisualClient:
         文件名确定性地按 session_id 命名（{sid}.{ext}），保证 manifest.file 与磁盘始终一致，
         避免旧实现用时间戳命名时 manifest 指向已被清理文件、下载路由 404 把 HTML 当图片存的缺陷。
         无 session_id（兜底调用）时回退时间戳命名。
+
+        SSRF 加固（P2-19）：① 仅允许白名单域名后缀（默认阿里云 OSS/百炼域名），
+        供应商响应被污染返回外部 URL 时直接拒绝；② 重定向逐跳校验同白名单
+        （防经 302 跳到内网/元数据地址）；③ 限流大小（默认 20MB），超限即中断并清理残文件。
         """
-        os.makedirs(settings.POSTER_DATA_DIR, exist_ok=True)
-        resp = requests.get(url, timeout=self.timeout * 2, stream=True)
+        from urllib.parse import urlparse
+
+        suffixes = settings.POSTER_DOWNLOAD_ALLOWED_HOST_SUFFIXES
+        host = (urlparse(url).hostname or "").lower()
+        if not any(host.endswith(s) for s in suffixes):
+            raise RuntimeError(f"海报下载地址域名不被允许: {host}")
+
+        resp = requests.get(
+            url,
+            timeout=self.timeout * 2,
+            stream=True,
+            allow_redirects=True,
+            hooks={"response": self._ssrf_redirect_guard},
+        )
         resp.raise_for_status()
+
+        max_bytes = settings.POSTER_DOWNLOAD_MAX_BYTES
+        cl = resp.headers.get("Content-Length")
+        if cl and int(cl) > max_bytes:
+            raise RuntimeError("海报文件超过大小上限")
+
+        os.makedirs(settings.POSTER_DATA_DIR, exist_ok=True)
         ct = resp.headers.get("Content-Type", "")
         if ct:
             out["media_type"] = ct
@@ -329,11 +352,33 @@ class BaiLianVisualClient:
                     pass
         else:
             dest = os.path.join(settings.POSTER_DATA_DIR, f"{int(time.time()*1000)}.{ext}")
+        written = 0
         with open(dest, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+                if not chunk:
+                    continue
+                written += len(chunk)
+                if written > max_bytes:
+                    f.close()
+                    try:
+                        os.remove(dest)
+                    except OSError:
+                        pass
+                    raise RuntimeError("海报文件超过大小上限")
+                f.write(chunk)
         return dest
+
+    def _ssrf_redirect_guard(self, response, *args, **kwargs):
+        """重定向逐跳校验（P2-19）：任一跳指向白名单外域名即拒绝，防 SSRF 内网跳转。"""
+        from urllib.parse import urlparse
+
+        loc = response.headers.get("Location")
+        if loc:
+            host = (urlparse(loc).hostname or "").lower()
+            suffixes = settings.POSTER_DOWNLOAD_ALLOWED_HOST_SUFFIXES
+            if not any(host.endswith(s) for s in suffixes):
+                raise RuntimeError(f"海报下载重定向到不被允许的域名: {host}")
+        return response
 
     def _log_call(self, out: dict) -> None:
         """写入专用日志 movie_agent.bailian（log/bailian_calls.log）。"""
@@ -432,8 +477,9 @@ def schedule_poster(
     if not items:
         return
     top3 = items[:3]
-    # 先把状态置为 pending，让前端立刻进入轮询
-    _update_status(session_id, {"status": "pending", "request_id": request_id, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    # 先把状态置为 pending，让前端立刻进入轮询（同时记录归属 user_id，供路由做 owner 校验）
+    _update_status(session_id, {"status": "pending", "request_id": request_id,
+                               "user_id": user_id, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
     metrics.incr("poster_generations_total", 1, {"status": "started"})
 
     def worker() -> None:
@@ -459,6 +505,7 @@ def schedule_poster(
                     "model_family": res.get("model_family"),
                     "media_type": res.get("media_type"),
                     "file": rel,
+                    "user_id": user_id,
                     "url": f"/poster/download/{session_id}",
                     "download_url": f"/poster/download/{session_id}?download=1",
                     "prompt": prompt,
@@ -471,17 +518,20 @@ def schedule_poster(
                     _update_status(session_id, {
                         "status": "ready", "placeholder": True, "model": model,
                         "model_family": res.get("model_family"), "media_type": "image/png",
-                        "file": rel, "url": f"/poster/download/{session_id}",
+                        "file": rel, "user_id": user_id,
+                        "url": f"/poster/download/{session_id}",
                         "download_url": f"/poster/download/{session_id}?download=1",
                         "prompt": prompt,
                     })
                     metrics.incr("poster_generations_total", 1, {"status": "placeholder"})
                 else:
-                    _update_status(session_id, {"status": "error", "error": res.get("error") or "生成失败"})
+                    _update_status(session_id, {"status": "error", "user_id": user_id,
+                                               "error": res.get("error") or "生成失败"})
                     metrics.incr("poster_generations_total", 1, {"status": "error"})
         except Exception as e:
             logger.warning("schedule_poster 线程异常 session=%s: %s", session_id, e)
-            _update_status(session_id, {"status": "error", "error": f"{type(e).__name__}: {e}"})
+            _update_status(session_id, {"status": "error", "user_id": user_id,
+                                       "error": f"{type(e).__name__}: {e}"})
             metrics.incr("poster_generations_total", 1, {"status": "error"})
 
     t = threading.Thread(target=worker, name=f"poster-{session_id}", daemon=True)
