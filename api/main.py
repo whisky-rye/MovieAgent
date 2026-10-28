@@ -92,6 +92,7 @@ def validate_security_config() -> None:
 @asynccontextmanager
 async def lifespan(app):  # noqa: ANN201
     validate_security_config()  # 启动即校验，不合规直接失败（fail-fast）
+    settings.validate_mysql_config()  # P2-20：MySQL 凭证缺失即拒绝启动（无 root/root 弱默认）
     # E4/O18：启动后台告警评估循环（按 ALERT_EVAL_INTERVAL 周期评估并推送告警）
     if settings.METRICS_ENABLED:
         try:

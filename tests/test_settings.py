@@ -48,3 +48,41 @@ def test_cloud_chains_present(monkeypatch):
     # 构造 lazy ChatOpenAI（不触发网络调用）
     assert cs.settings.cloud_strong_chain is not None
     assert cs.settings.cloud_light_chain is not None
+
+
+# ---- P2-20：IMDB MySQL 弱默认凭证移除 + fail-fast ----
+def test_mysql_weak_default_removed():
+    """代码默认值不再为 root/root（弱默认）；实际值由 .env 覆盖。"""
+    from config.settings import Settings
+
+    assert Settings.model_fields["IMDB_MYSQL_USER"].default == ""
+    assert Settings.model_fields["IMDB_MYSQL_PASS"].default == ""
+
+
+def test_validate_mysql_config_raises_when_missing(monkeypatch):
+    """缺凭证且未配置远端覆盖 → 启动 fail-fast。"""
+    monkeypatch.setattr(cs.settings, "IMDB_MYSQL_USER", "")
+    monkeypatch.setattr(cs.settings, "IMDB_MYSQL_PASS", "")
+    monkeypatch.setattr(cs.settings, "MOVIE_AGENT_MYSQL_DSN_OVERRIDE", "")
+    with pytest.raises(RuntimeError, match="不能为空"):
+        cs.settings.validate_mysql_config()
+
+
+def test_validate_mysql_config_ok_with_override(monkeypatch):
+    """业务库走远端 DSN 覆盖 + 语料库凭证齐 → 通过。"""
+    monkeypatch.setattr(cs.settings, "IMDB_MYSQL_USER", "u")
+    monkeypatch.setattr(cs.settings, "IMDB_MYSQL_PASS", "p")
+    monkeypatch.setattr(cs.settings, "MOVIE_AGENT_MYSQL_DSN_OVERRIDE",
+                        "mysql+pymysql://u:p@47.1.2.3:3306/movie_agent")
+    # 不应抛错
+    cs.settings.validate_mysql_config()
+
+
+def test_validate_mysql_config_override_still_requires_corpus_creds(monkeypatch):
+    """即便业务库走远端覆盖，语料库凭证缺失仍 fail-fast。"""
+    monkeypatch.setattr(cs.settings, "IMDB_MYSQL_USER", "")
+    monkeypatch.setattr(cs.settings, "IMDB_MYSQL_PASS", "")
+    monkeypatch.setattr(cs.settings, "MOVIE_AGENT_MYSQL_DSN_OVERRIDE",
+                        "mysql+pymysql://u:p@47.1.2.3:3306/movie_agent")
+    with pytest.raises(RuntimeError):
+        cs.settings.validate_mysql_config()

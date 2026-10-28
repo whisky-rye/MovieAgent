@@ -10,8 +10,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # ---- MySQL 票据（用户提供的 IMDB_MYSQL_*） ----
-    IMDB_MYSQL_USER: str = "root"
-    IMDB_MYSQL_PASS: str = "root"
+    # ⚠️ 安全（P2-20）：不再提供 root/root 弱默认。缺失即启动 fail-fast，
+    # 必须在 .env 显式配置；业务库可改用 MOVIE_AGENT_MYSQL_DSN_OVERRIDE 指向远端。
+    IMDB_MYSQL_USER: str = ""
+    IMDB_MYSQL_PASS: str = ""
     IMDB_MYSQL_ADDR: str = "127.0.0.1:3306"
     IMDB_MYSQL_DB: str = "imdb"
 
@@ -315,6 +317,10 @@ class Settings(BaseSettings):
     # 异步任务轮询上限（秒）与轮询间隔（秒）
     POSTER_TASK_TIMEOUT: int = 300
     POSTER_TASK_POLL: int = 3
+    # 海报下载 SSRF 加固（P2-19）：供应商临时 URL 仅允许白名单域名后缀；
+    # 重定向逐跳校验同白名单；大小上限防止巨文件打满磁盘。
+    POSTER_DOWNLOAD_ALLOWED_HOST_SUFFIXES: list[str] = ["aliyuncs.com", "aliyun.com"]
+    POSTER_DOWNLOAD_MAX_BYTES: int = 20 * 1024 * 1024  # 20MB
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -366,6 +372,26 @@ class Settings(BaseSettings):
     def cloud_model_chain(self) -> List[str]:
         """兼容旧字段：返回强档链（优先）。"""
         return self.cloud_strong_chain
+
+    def validate_mysql_config(self) -> None:
+        """MySQL 凭证 fail-fast（P2-20）：弱默认 root/root 已移除，缺失即拒绝启动。
+
+        - 业务库走 MOVIE_AGENT_MYSQL_DSN_OVERRIDE：仍要求语料库 IMDB_MYSQL_* 显式配置；
+        - 否则 IMDB_MYSQL_USER / IMDB_MYSQL_PASS 任一为空即启动失败。
+        """
+        if self.MOVIE_AGENT_MYSQL_DSN_OVERRIDE:
+            if not self.IMDB_MYSQL_USER or not self.IMDB_MYSQL_PASS:
+                raise RuntimeError(
+                    "语料库 MySQL 凭证缺失：设置 MOVIE_AGENT_MYSQL_DSN_OVERRIDE 后，"
+                    "语料库 IMDB_MYSQL_USER / IMDB_MYSQL_PASS 仍须显式配置。"
+                )
+            return
+        if not self.IMDB_MYSQL_USER or not self.IMDB_MYSQL_PASS:
+            raise RuntimeError(
+                "MySQL 凭证缺失：IMDB_MYSQL_USER / IMDB_MYSQL_PASS 不能为空"
+                "（已移除 root/root 弱默认）。请在 .env 显式配置本地 MySQL 凭证，"
+                "或设置 MOVIE_AGENT_MYSQL_DSN_OVERRIDE 指向远端业务库。"
+            )
 
     @staticmethod
     def _split_chain(raw: str) -> List[str]:

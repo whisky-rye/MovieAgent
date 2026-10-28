@@ -271,11 +271,12 @@ GUARDRAIL_ENABLED=true
 GUARDRAIL_BLOCK_OFFTOPIC=true
 GUARDRAIL_MODE=rule           # rule 零额度 | hybrid 边界 case 调 chat_light 复核
 # MySQL 片源
-IMDB_MYSQL_HOST=127.0.0.1
-IMDB_MYSQL_PORT=3306
-IMDB_MYSQL_USER=root
-IMDB_MYSQL_PASSWORD=...
-IMDB_MYSQL_DATABASE=imdb
+IMDB_MYSQL_USER=<你的MySQL用户名>      # 必须显式配置，已无 root/root 弱默认（缺失即启动失败）
+IMDB_MYSQL_PASS=<你的MySQL密码>
+IMDB_MYSQL_ADDR=127.0.0.1:3306          # 对应旧式 HOST/PORT 合并写法
+IMDB_MYSQL_DB=imdb
+# 业务库（users/sessions/preferences）可改用远端 DSN 覆盖：
+# MOVIE_AGENT_MYSQL_DSN_OVERRIDE=mysql+pymysql://user:pass@host:3306/movie_agent?charset=utf8mb4
 ```
 
 ---
