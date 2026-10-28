@@ -58,22 +58,32 @@ def main():
     ap.add_argument("--topk", type=int, default=10)
     ap.add_argument("--distractors", type=int, default=8, help="每个 query 混入的干扰项数量")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--allow-missing", action="store_true",
+                    help="资产缺失/为空时以 exit 0 跳过（仅用于确实无语料的环境，"
+                         "CI 门禁切勿开启，否则门禁形同虚设）")
     args = ap.parse_args()
 
+    # P2-21：门禁资产缺失/为空时默认 exit 非零，禁止 CI 静默通过。
+    # 只有显式 --allow-missing 才允许以 exit 0 跳过（如确实无语料的环境）。
+    def _missing(reason: str):
+        if args.allow_missing:
+            print(f"[skip] {reason}（--allow-missing 已开启，exit 0 跳过）")
+            sys.exit(0)
+        print(f"[ERROR] {reason} —— 门禁资产缺失，exit 2（CI 不得静默通过；"
+              f"先跑 scripts/build_gold.py 或显式传 --gold）")
+        sys.exit(2)
+
     if not os.path.exists(args.gold):
-        print(f"[skip] 找不到 gold：{args.gold}（先跑 scripts/build_gold.py）")
-        sys.exit(0)
+        _missing(f"找不到 gold：{args.gold}")
 
     gold = _load_gold(args.gold)
     if not gold:
-        print("[skip] gold 为空")
-        sys.exit(0)
+        _missing("gold 为空")
 
     random.seed(args.seed)
     all_ids = [i for q in gold for i in q.get("relevant", [])]
     if len(all_ids) < args.distractors + 1:
-        print("[skip] gold 相关项不足以构造干扰集")
-        sys.exit(0)
+        _missing(f"gold 相关项不足以构造干扰集（仅 {len(all_ids)} 个，需 ≥ {args.distractors + 1}）")
 
     print(f"{'query':<28} {'NDCG@10 base':>13} {'NDCG@10 fb':>12} {'Δ':>8}  verdict")
     print("-" * 78)
