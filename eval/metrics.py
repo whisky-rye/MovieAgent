@@ -10,7 +10,7 @@
 （或 {id: 相关度} 字典以支持 graded relevance）。
 """
 import math
-from typing import Dict, Iterable, List, Set, Union
+from typing import Dict, Iterable, List, Optional, Set, Union
 
 
 def _as_set(relevant) -> Set[str]:
@@ -82,18 +82,20 @@ def _genres_of(item) -> List[str]:
     return list(g)
 
 
-def diversity_at_k(items: List, k: int, key: str = "genres") -> float:
+def diversity_at_k(items: List, k: int, key: str = "genres") -> Optional[float]:
     """列表内多样性：1 - 平均两两类型 Jaccard 重叠（越高越多样，[0,1]）。
 
-    - 不足 2 项或无类型信息时返回 1.0（视为无重复、最多样）。
+    - 不足 2 项（无法构成 pairwise 比较）或所有项的类型信息都为空时返回 **None**，
+      表示「无信息」，**调用方必须将其从均值中剔除**，不得当作 1.0（最多样）计入，
+      否则会把空类型列表虚高成"最多样"，拉高整体均值（P2-22）。
     - 单对重叠 = |A∩B| / |A∪B|（两者皆空按 0 重叠计）。
     """
     sub = items[:k]
     if len(sub) < 2:
-        return 1.0
+        return None
     sets = [set(_genres_of(it)) for it in sub]
     if all(len(s) == 0 for s in sets):
-        return 1.0
+        return None
     overlap_sum = 0.0
     pairs = 0
     for i in range(len(sets)):
@@ -104,5 +106,55 @@ def diversity_at_k(items: List, k: int, key: str = "genres") -> float:
             overlap_sum += ov
             pairs += 1
     if pairs == 0:
-        return 1.0
+        return None
     return 1.0 - (overlap_sum / pairs)
+
+
+def mrr_at_k(ranked_ids: List[str], relevant: Iterable[str], k: int) -> float:
+    """MRR@k：首位相关项的倒数排名（1-based），超出 k 或无命中记 0.0。
+
+    衡量"第一个相关项有多靠前"，对 top-1 质量敏感，适合点击/首选项评估。
+    """
+    rel_set = _as_set(relevant)
+    if not rel_set:
+        return 0.0
+    for i, rid in enumerate(ranked_ids[:k], 1):
+        if rid in rel_set:
+            return 1.0 / i
+    return 0.0
+
+
+def map_at_k(ranked_ids: List[str], relevant: Iterable[str], k: int) -> float:
+    """MAP@k（单 query 的 Average Precision）：相关项命中位置的精度均值。
+
+    AP = Σ_{命中位 i} P(i) / min(k, |relevant|)，其中 P(i) 为第 i 位时的累计精度
+    （前 i 项中相关项占比）。无相关集或零命中返回 0.0。
+    """
+    rel_set = _as_set(relevant)
+    if not rel_set:
+        return 0.0
+    hits = 0
+    score = 0.0
+    for i, rid in enumerate(ranked_ids[:k], 1):
+        if rid in rel_set:
+            hits += 1
+            score += hits / i
+    if hits == 0:
+        return 0.0
+    denom = min(k, len(rel_set))
+    return score / denom
+
+
+def first_relevant_position(ranked_ids: List[str], relevant: Iterable[str], k: int) -> int:
+    """位置偏差度量：首个相关项的 1-based 名次（超出 k 或无命中记 0）。
+
+    0 表示整段 top-k 内无相关项；值越小说明相关项越靠前（位置偏差越低）。
+    适合与 NDCG/MRR 互补，直接暴露"相关项被压到很深"的问题。
+    """
+    rel_set = _as_set(relevant)
+    if not rel_set:
+        return 0
+    for i, rid in enumerate(ranked_ids[:k], 1):
+        if rid in rel_set:
+            return i
+    return 0
