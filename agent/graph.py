@@ -223,7 +223,7 @@ def _sediment_preferences(state: AgentState) -> None:
     - 任何异常静默忽略，绝不阻断主流程。
     """
     uid = state.get("user_id", "default")
-    if uid in ("default", "tool", ""):
+    if uid in ("default", "tool", "eval", ""):
         return
     intent = state.get("intent")
     query = state.get("query", "")

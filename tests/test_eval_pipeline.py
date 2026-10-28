@@ -47,7 +47,7 @@ def test_evaluate_fused_mode_uses_ranking(monkeypatch):
         for i in range(1, 5)  # douban:1 科幻, douban:2 喜剧, douban:3 科幻, douban:4 喜剧
     ]
     monkeypatch.setattr(eval_run, "run_fused_ranking", lambda q, top_k: fake)
-    res = eval_run.evaluate(gold, top_k=10, mode="fused")
+    res = eval_run.evaluate(gold, top_k=10, mode="fused", ranking="agent")
     assert res["mode"] == "fused"
     pq = res["per_query"][0]
     # douban:1 在首位、douban:3 在第三位 → 命中且 NDCG>0

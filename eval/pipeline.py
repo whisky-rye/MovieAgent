@@ -28,13 +28,20 @@ def run_fused_ranking(
     top_k: int = 20,
     user_id: str = "eval",
     agent=None,
+    ranking_fn=None,
 ) -> List[Candidate]:
-    """跑完整 Agent 图，返回融合重排后的候选列表（state['ranked']）。
+    """返回融合重排后的候选列表。
 
-    - agent=None 时自行 build_agent()；注入 agent 用于测试/复用已编译图。
+    - ranking_fn 注入时（P2-23 推荐路径）：直接调用纯排序函数
+      `(query, top_k) -> List[Candidate]`，**不构建 Agent、不依赖 LLM/向量库、
+      不向 memory 库写任何偏好**，结果可复现、无副作用。
+    - ranking_fn=None 时回退到完整 Agent 图（agent 或新建），用于需要
+      端到端真实链路（含 LLM 精排）的 live 评估。
     - 输入与 api/main.py 的 _run 一致（user_id/query/request_id/history/steps/thinking），
       但不走护栏/限流/历史压缩，保持纯评估语义。
     """
+    if ranking_fn is not None:
+        return ranking_fn(query, top_k)
     app = agent or _build_agent()
     result = app.invoke(
         {
