@@ -7,8 +7,8 @@
     {
       "mcpServers": {
         "movie-agent-prod-readonly": {
-          "command": "./.venv/Scripts/python.exe",
-          "args": ["./scripts/run_mcp_prod_server.py"],
+          "command": ".venv/Scripts/python.exe",
+          "args": ["scripts/run_mcp_prod_server.py"],
           "env": {"MCP_DB_HOST": "...", "MCP_DB_USER": "...", "MCP_DB_PASSWORD": "..."}
         }
       }
